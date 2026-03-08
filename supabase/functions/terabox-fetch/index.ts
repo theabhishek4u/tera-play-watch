@@ -56,13 +56,13 @@ Deno.serve(async (req) => {
 
     if (api2Data.status === 'success' && api2Data.files?.length > 0) {
       const files = api2Data.files.map((f: any) => ({
-        name: f.name || f.server_filename || 'Unknown',
-        size: f.size_formatted || formatSize(f.size || 0),
-        sizeBytes: f.size || 0,
-        thumbnail: f.thumbnail || f.thumbs?.url3 || '',
-        isVideo: isVideoFile(f.name || f.server_filename || ''),
+        name: f.filename || f.name || f.server_filename || 'Unknown',
+        size: f.size || formatSize(f.size_bytes || 0),
+        sizeBytes: f.size_bytes || 0,
+        thumbnail: f.thumbnails?.original || f.thumbnail || '',
+        isVideo: isVideoFile(f.filename || f.name || f.server_filename || ''),
         dlink: f.download_link || f.dlink || '',
-        fsId: String(f.fs_id || f.id || Math.random()),
+        fsId: String(f.fs_id || Math.random()),
       }));
 
       // Try to get streaming URL if surl available
