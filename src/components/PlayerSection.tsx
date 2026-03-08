@@ -78,9 +78,8 @@ const PlayerSection = () => {
   // Build proxy URL through our edge function
   const getProxyUrl = () => {
     if (!videoData?.surl) return "";
-    const projectId = import.meta.env.VITE_SUPABASE_PROJECT_ID || 
-      import.meta.env.VITE_SUPABASE_URL?.replace('https://', '').replace('.supabase.co', '') || '';
-    return `https://${projectId}.supabase.co/functions/v1/terabox-proxy?surl=${videoData.surl}`;
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+    return `${supabaseUrl}/functions/v1/terabox-proxy?surl=${videoData.surl}`;
   };
 
   const handlePlay = () => {
