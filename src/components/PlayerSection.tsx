@@ -1,6 +1,7 @@
-import { useState, useRef } from "react";
-import { Play, Download, Link, Loader2, AlertCircle, FileVideo, ExternalLink, Pause, Volume2, VolumeX, Maximize } from "lucide-react";
+import { useState, useRef, useCallback, useEffect } from "react";
+import { Play, Download, Link, Loader2, AlertCircle, FileVideo, ExternalLink } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import Hls from "hls.js";
 
 interface TeraBoxFile {
   name: string;
@@ -27,6 +28,7 @@ const PlayerSection = () => {
   const [playing, setPlaying] = useState(false);
   const [videoLoading, setVideoLoading] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const hlsRef = useRef<Hls | null>(null);
 
   const handleFetch = async () => {
     if (!url.trim()) return;
@@ -42,6 +44,7 @@ const PlayerSection = () => {
     setVideoData(null);
     setActiveVideo(null);
     setPlaying(false);
+    cleanupHls();
 
     try {
       const { data, error: fnError } = await supabase.functions.invoke("terabox-fetch", {
@@ -69,30 +72,86 @@ const PlayerSection = () => {
     }
   };
 
+  const cleanupHls = useCallback(() => {
+    if (hlsRef.current) {
+      hlsRef.current.destroy();
+      hlsRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => cleanupHls();
+  }, [cleanupHls]);
+
+  const getProxyM3U8Url = () => {
+    if (!videoData?.surl) return "";
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+    return `${supabaseUrl}/functions/v1/terabox-proxy?surl=${videoData.surl}&type=m3u8&quality=M3U8_AUTO_720`;
+  };
+
+  const handlePlay = () => {
+    if (!videoData?.surl || !videoRef.current) return;
+    
+    setPlaying(true);
+    setVideoLoading(true);
+    setError("");
+
+    const m3u8Url = getProxyM3U8Url();
+    console.log("Playing HLS:", m3u8Url);
+
+    cleanupHls();
+
+    if (Hls.isSupported()) {
+      const hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: false,
+        maxBufferLength: 30,
+        maxMaxBufferLength: 60,
+      });
+
+      hls.loadSource(m3u8Url);
+      hls.attachMedia(videoRef.current);
+
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        console.log("HLS manifest loaded");
+        setVideoLoading(false);
+        videoRef.current?.play().catch(console.error);
+      });
+
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        console.error("HLS error:", data.type, data.details, data.fatal);
+        if (data.fatal) {
+          setVideoLoading(false);
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            // Try to recover once
+            console.log("Attempting recovery...");
+            hls.startLoad();
+          } else {
+            setError("Video stream failed. Use the Download button instead.");
+            setPlaying(false);
+          }
+        }
+      });
+
+      hlsRef.current = hls;
+    } else if (videoRef.current.canPlayType('application/vnd.apple.mpegurl')) {
+      // Safari native HLS
+      videoRef.current.src = m3u8Url;
+      videoRef.current.addEventListener('loadedmetadata', () => {
+        setVideoLoading(false);
+        videoRef.current?.play().catch(console.error);
+      });
+    } else {
+      setError("HLS not supported. Use the Download button.");
+      setPlaying(false);
+      setVideoLoading(false);
+    }
+  };
+
   const handleDownload = (file: TeraBoxFile) => {
     if (file.dlink) {
       window.open(file.dlink, "_blank");
     }
-  };
-
-  // Build proxy URL through our edge function
-  const getProxyUrl = () => {
-    if (!videoData?.surl) return "";
-    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-    return `${supabaseUrl}/functions/v1/terabox-proxy?surl=${videoData.surl}`;
-  };
-
-  const handlePlay = () => {
-    if (!videoData?.surl) return;
-    setVideoLoading(true);
-    setPlaying(true);
-    
-    // Video will start loading via the proxy URL
-    setTimeout(() => {
-      if (videoRef.current) {
-        videoRef.current.play().catch(console.error);
-      }
-    }, 100);
   };
 
   return (
@@ -144,31 +203,17 @@ const PlayerSection = () => {
           <div className="mx-auto mt-10 max-w-4xl animate-in fade-in slide-in-from-bottom-4 duration-500">
             <div className="overflow-hidden rounded-2xl border border-border bg-card">
               <div className="relative aspect-video bg-muted/30">
-                {playing ? (
-                  <>
-                    <video
-                      ref={videoRef}
-                      controls
-                      autoPlay
-                      className="h-full w-full"
-                      poster={activeVideo.thumbnail}
-                      src={getProxyUrl()}
-                      onLoadedData={() => setVideoLoading(false)}
-                      onError={() => {
-                        setVideoLoading(false);
-                        setError("Video playback failed. Try the Download button instead.");
-                      }}
-                    />
-                    {videoLoading && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-background/60">
-                        <div className="flex flex-col items-center gap-3">
-                          <Loader2 className="h-10 w-10 animate-spin text-primary" />
-                          <p className="text-sm text-muted-foreground">Loading video...</p>
-                        </div>
-                      </div>
-                    )}
-                  </>
-                ) : (
+                {/* Always render video element but hide when not playing */}
+                <video
+                  ref={videoRef}
+                  controls
+                  className={`h-full w-full ${playing ? '' : 'hidden'}`}
+                  poster={activeVideo.thumbnail}
+                  playsInline
+                />
+
+                {/* Play overlay */}
+                {!playing && (
                   <div className="relative h-full w-full cursor-pointer" onClick={handlePlay}>
                     {activeVideo.thumbnail ? (
                       <img src={activeVideo.thumbnail} alt={activeVideo.name} className="h-full w-full object-cover" />
@@ -179,6 +224,16 @@ const PlayerSection = () => {
                       <div className="flex h-20 w-20 items-center justify-center rounded-full bg-primary shadow-lg transition-transform hover:scale-110">
                         <Play className="ml-1 h-8 w-8 fill-primary-foreground text-primary-foreground" />
                       </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Loading */}
+                {videoLoading && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-background/60">
+                    <div className="flex flex-col items-center gap-3">
+                      <Loader2 className="h-10 w-10 animate-spin text-primary" />
+                      <p className="text-sm text-muted-foreground">Loading stream...</p>
                     </div>
                   </div>
                 )}
@@ -201,10 +256,7 @@ const PlayerSection = () => {
                         Download
                       </button>
                     )}
-                    <a
-                      href={url}
-                      target="_blank"
-                      rel="noopener noreferrer"
+                    <a href={url} target="_blank" rel="noopener noreferrer"
                       className="flex items-center gap-2 rounded-xl border border-border px-4 py-2.5 text-sm font-medium text-muted-foreground transition-all hover:text-foreground"
                     >
                       <ExternalLink className="h-4 w-4" />
@@ -224,7 +276,7 @@ const PlayerSection = () => {
                 {videoData.files.map((file) => (
                   <button
                     key={file.fsId}
-                    onClick={() => { setActiveVideo(file); setPlaying(false); }}
+                    onClick={() => { setActiveVideo(file); setPlaying(false); cleanupHls(); }}
                     className={`flex w-full items-center gap-4 rounded-xl border p-4 text-left transition-all ${
                       activeVideo.fsId === file.fsId ? "border-primary/50 bg-primary/5" : "border-border bg-card hover:border-primary/30"
                     }`}
