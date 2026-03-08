@@ -10,11 +10,13 @@ interface TeraBoxFile {
   isVideo: boolean;
   dlink: string;
   fsId: string;
+  streamUrl?: string;
 }
 
 interface VideoData {
   title: string;
   files: TeraBoxFile[];
+  surl?: string;
 }
 
 const PlayerSection = () => {
@@ -27,7 +29,7 @@ const PlayerSection = () => {
   const handleFetch = async () => {
     if (!url.trim()) return;
 
-    if (!url.includes("terabox") && !url.includes("1024tera") && !url.includes("freeterabox") && !url.includes("teraboxlink")) {
+    if (!url.includes("terabox") && !url.includes("1024tera") && !url.includes("freeterabox") && !url.includes("teraboxlink") && !url.includes("teraboxshare")) {
       setError("कृपया एक valid TeraBox URL डालें।");
       return;
     }
@@ -65,7 +67,11 @@ const PlayerSection = () => {
 
   const handleDownload = (file: TeraBoxFile) => {
     if (file.dlink) {
-      window.open(file.dlink, "_blank");
+      const a = document.createElement("a");
+      a.href = file.dlink;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.click();
     }
   };
 
@@ -123,23 +129,40 @@ const PlayerSection = () => {
             <div className="overflow-hidden rounded-2xl border border-border bg-card">
               {/* Video Player */}
               <div className="relative aspect-video bg-muted/30">
-                {activeVideo.dlink ? (
-                  <video
+                {activeVideo.isVideo && activeVideo.dlink ? (
+                  <iframe
                     key={activeVideo.fsId}
-                    controls
-                    autoPlay
+                    src={activeVideo.dlink}
                     className="h-full w-full"
-                    poster={activeVideo.thumbnail}
-                  >
-                    <source src={activeVideo.dlink} type="video/mp4" />
-                    Your browser does not support video playback.
-                  </video>
+                    allow="autoplay; fullscreen"
+                    allowFullScreen
+                    sandbox="allow-same-origin allow-scripts"
+                    title={activeVideo.name}
+                  />
+                ) : activeVideo.thumbnail ? (
+                  <div className="relative h-full w-full">
+                    <img
+                      src={activeVideo.thumbnail}
+                      alt={activeVideo.name}
+                      className="h-full w-full object-cover"
+                    />
+                    <div className="absolute inset-0 flex items-center justify-center bg-background/40">
+                      <a
+                        href={activeVideo.dlink}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex h-20 w-20 items-center justify-center rounded-full bg-primary/90 transition-all hover:scale-110"
+                      >
+                        <Play className="h-8 w-8 fill-primary-foreground text-primary-foreground" />
+                      </a>
+                    </div>
+                  </div>
                 ) : (
                   <div className="flex h-full items-center justify-center">
                     <div className="text-center">
                       <FileVideo className="mx-auto h-16 w-16 text-muted-foreground/50" />
                       <p className="mt-4 text-sm text-muted-foreground">
-                        Direct playback not available. Use download instead.
+                        Click download to get the video
                       </p>
                     </div>
                   </div>
@@ -197,14 +220,18 @@ const PlayerSection = () => {
                         : "border-border bg-card hover:border-primary/30"
                     }`}
                   >
-                    <FileVideo className="h-5 w-5 shrink-0 text-primary" />
+                    {file.thumbnail ? (
+                      <img src={file.thumbnail} alt="" className="h-12 w-16 rounded-lg object-cover" />
+                    ) : (
+                      <FileVideo className="h-5 w-5 shrink-0 text-primary" />
+                    )}
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-medium">{file.name}</p>
                       <p className="text-xs text-muted-foreground">{file.size}</p>
                     </div>
                     {file.dlink && (
                       <Download
-                        className="h-4 w-4 shrink-0 text-muted-foreground hover:text-primary"
+                        className="h-4 w-4 shrink-0 text-muted-foreground hover:text-primary cursor-pointer"
                         onClick={(e) => {
                           e.stopPropagation();
                           handleDownload(file);
