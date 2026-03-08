@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Play, Download, Link, Loader2, AlertCircle, FileVideo, ExternalLink } from "lucide-react";
+import { useState, useRef } from "react";
+import { Play, Download, Link, Loader2, AlertCircle, FileVideo, ExternalLink, Pause, Volume2, VolumeX, Maximize } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 
 interface TeraBoxFile {
@@ -16,7 +16,6 @@ interface VideoData {
   title: string;
   files: TeraBoxFile[];
   surl?: string;
-  streamUrl?: string;
 }
 
 const PlayerSection = () => {
@@ -25,7 +24,9 @@ const PlayerSection = () => {
   const [videoData, setVideoData] = useState<VideoData | null>(null);
   const [error, setError] = useState("");
   const [activeVideo, setActiveVideo] = useState<TeraBoxFile | null>(null);
-  const [showPlayer, setShowPlayer] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [videoLoading, setVideoLoading] = useState(false);
+  const videoRef = useRef<HTMLVideoElement>(null);
 
   const handleFetch = async () => {
     if (!url.trim()) return;
@@ -40,7 +41,7 @@ const PlayerSection = () => {
     setError("");
     setVideoData(null);
     setActiveVideo(null);
-    setShowPlayer(false);
+    setPlaying(false);
 
     try {
       const { data, error: fnError } = await supabase.functions.invoke("terabox-fetch", {
@@ -74,14 +75,25 @@ const PlayerSection = () => {
     }
   };
 
-  const handlePlay = () => {
-    setShowPlayer(true);
+  // Build proxy URL through our edge function
+  const getProxyUrl = () => {
+    if (!videoData?.surl) return "";
+    const projectId = import.meta.env.VITE_SUPABASE_PROJECT_ID || 
+      import.meta.env.VITE_SUPABASE_URL?.replace('https://', '').replace('.supabase.co', '') || '';
+    return `https://${projectId}.supabase.co/functions/v1/terabox-proxy?surl=${videoData.surl}`;
   };
 
-  // Build embed URL for iframe playback
-  const getEmbedUrl = () => {
-    if (!videoData?.surl) return "";
-    return `https://www.terabox.app/sharing/embed?surl=${videoData.surl}&resolution=1080&autoplay=true`;
+  const handlePlay = () => {
+    if (!videoData?.surl) return;
+    setVideoLoading(true);
+    setPlaying(true);
+    
+    // Video will start loading via the proxy URL
+    setTimeout(() => {
+      if (videoRef.current) {
+        videoRef.current.play().catch(console.error);
+      }
+    }, 100);
   };
 
   return (
@@ -115,11 +127,7 @@ const PlayerSection = () => {
               disabled={loading || !url.trim()}
               className="flex shrink-0 items-center gap-2 rounded-xl bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground transition-all hover:scale-105 disabled:opacity-50 disabled:hover:scale-100"
             >
-              {loading ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Play className="h-4 w-4" />
-              )}
+              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
               {loading ? "Fetching..." : "Fetch"}
             </button>
           </div>
@@ -132,33 +140,39 @@ const PlayerSection = () => {
           )}
         </div>
 
-        {/* Video Player Area */}
+        {/* Video Player */}
         {videoData && activeVideo && (
           <div className="mx-auto mt-10 max-w-4xl animate-in fade-in slide-in-from-bottom-4 duration-500">
             <div className="overflow-hidden rounded-2xl border border-border bg-card">
-              {/* Video Player */}
               <div className="relative aspect-video bg-muted/30">
-                {showPlayer && videoData.surl ? (
-                  <iframe
-                    src={getEmbedUrl()}
-                    className="h-full w-full"
-                    allow="autoplay; fullscreen; encrypted-media"
-                    allowFullScreen
-                    referrerPolicy="no-referrer"
-                    title={activeVideo.name}
-                    style={{ border: 'none' }}
-                  />
+                {playing ? (
+                  <>
+                    <video
+                      ref={videoRef}
+                      controls
+                      autoPlay
+                      className="h-full w-full"
+                      poster={activeVideo.thumbnail}
+                      src={getProxyUrl()}
+                      onLoadedData={() => setVideoLoading(false)}
+                      onError={() => {
+                        setVideoLoading(false);
+                        setError("Video playback failed. Try the Download button instead.");
+                      }}
+                    />
+                    {videoLoading && (
+                      <div className="absolute inset-0 flex items-center justify-center bg-background/60">
+                        <div className="flex flex-col items-center gap-3">
+                          <Loader2 className="h-10 w-10 animate-spin text-primary" />
+                          <p className="text-sm text-muted-foreground">Loading video...</p>
+                        </div>
+                      </div>
+                    )}
+                  </>
                 ) : (
-                  <div
-                    className="relative h-full w-full cursor-pointer"
-                    onClick={handlePlay}
-                  >
+                  <div className="relative h-full w-full cursor-pointer" onClick={handlePlay}>
                     {activeVideo.thumbnail ? (
-                      <img
-                        src={activeVideo.thumbnail}
-                        alt={activeVideo.name}
-                        className="h-full w-full object-cover"
-                      />
+                      <img src={activeVideo.thumbnail} alt={activeVideo.name} className="h-full w-full object-cover" />
                     ) : (
                       <div className="h-full w-full bg-muted/50" />
                     )}
@@ -175,12 +189,8 @@ const PlayerSection = () => {
               <div className="border-t border-border p-5">
                 <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                   <div className="min-w-0">
-                    <h3 className="truncate font-display font-semibold text-foreground">
-                      {activeVideo.name}
-                    </h3>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      Size: {activeVideo.size}
-                    </p>
+                    <h3 className="truncate font-display font-semibold text-foreground">{activeVideo.name}</h3>
+                    <p className="mt-1 text-sm text-muted-foreground">Size: {activeVideo.size}</p>
                   </div>
                   <div className="flex gap-3">
                     {activeVideo.dlink && (
@@ -215,11 +225,9 @@ const PlayerSection = () => {
                 {videoData.files.map((file) => (
                   <button
                     key={file.fsId}
-                    onClick={() => { setActiveVideo(file); setShowPlayer(false); }}
+                    onClick={() => { setActiveVideo(file); setPlaying(false); }}
                     className={`flex w-full items-center gap-4 rounded-xl border p-4 text-left transition-all ${
-                      activeVideo.fsId === file.fsId
-                        ? "border-primary/50 bg-primary/5"
-                        : "border-border bg-card hover:border-primary/30"
+                      activeVideo.fsId === file.fsId ? "border-primary/50 bg-primary/5" : "border-border bg-card hover:border-primary/30"
                     }`}
                   >
                     {file.thumbnail ? (
@@ -234,10 +242,7 @@ const PlayerSection = () => {
                     {file.dlink && (
                       <Download
                         className="h-4 w-4 shrink-0 text-muted-foreground hover:text-primary cursor-pointer"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDownload(file);
-                        }}
+                        onClick={(e) => { e.stopPropagation(); handleDownload(file); }}
                       />
                     )}
                   </button>
