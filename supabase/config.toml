@@ -1,1 +1,7 @@
 project_id = "qmzwtgyromtwqqnjlych"
+
+[functions.terabox-proxy]
+verify_jwt = false
+
+[functions.terabox-fetch]
+verify_jwt = false

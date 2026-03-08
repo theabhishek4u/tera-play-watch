@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Play, Download, Link, Loader2, AlertCircle, FileVideo, ExternalLink } from "lucide-react";
+import { Play, Download, Link, Loader2, AlertCircle, FileVideo, ExternalLink, Info } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 
 interface TeraBoxFile {
@@ -16,7 +16,6 @@ interface VideoData {
   title: string;
   files: TeraBoxFile[];
   surl?: string;
-  streamUrl?: string;
 }
 
 const PlayerSection = () => {
@@ -25,14 +24,13 @@ const PlayerSection = () => {
   const [videoData, setVideoData] = useState<VideoData | null>(null);
   const [error, setError] = useState("");
   const [activeVideo, setActiveVideo] = useState<TeraBoxFile | null>(null);
-  const [showPlayer, setShowPlayer] = useState(false);
 
   const handleFetch = async () => {
     if (!url.trim()) return;
 
     const validDomains = ["terabox", "1024tera", "freeterabox", "teraboxlink", "teraboxshare"];
     if (!validDomains.some(d => url.includes(d))) {
-      setError("कृपया एक valid TeraBox URL डालें।");
+      setError("Please enter a valid TeraBox URL.");
       return;
     }
 
@@ -40,7 +38,6 @@ const PlayerSection = () => {
     setError("");
     setVideoData(null);
     setActiveVideo(null);
-    setShowPlayer(false);
 
     try {
       const { data, error: fnError } = await supabase.functions.invoke("terabox-fetch", {
@@ -68,20 +65,21 @@ const PlayerSection = () => {
     }
   };
 
+  const getTeraBoxPlayUrl = () => {
+    if (!videoData?.surl) return url;
+    return `https://www.terabox.app/sharing/link?surl=${videoData.surl}`;
+  };
+
   const handleDownload = (file: TeraBoxFile) => {
     if (file.dlink) {
       window.open(file.dlink, "_blank");
+    } else {
+      window.open(getTeraBoxPlayUrl(), "_blank");
     }
   };
 
-  const handlePlay = () => {
-    setShowPlayer(true);
-  };
-
-  // Build embed URL for iframe playback
-  const getEmbedUrl = () => {
-    if (!videoData?.surl) return "";
-    return `https://www.terabox.app/sharing/embed?surl=${videoData.surl}&resolution=1080&autoplay=true`;
+  const handlePlayOnTeraBox = () => {
+    window.open(getTeraBoxPlayUrl(), "_blank");
   };
 
   return (
@@ -94,7 +92,7 @@ const PlayerSection = () => {
             Paste Your <span className="text-primary">TeraBox Link</span>
           </h2>
           <p className="mt-3 text-muted-foreground">
-            Enter the TeraBox video URL below and hit Enter to play or download.
+            Enter the TeraBox video URL below and hit Enter to fetch video info.
           </p>
         </div>
 
@@ -115,11 +113,7 @@ const PlayerSection = () => {
               disabled={loading || !url.trim()}
               className="flex shrink-0 items-center gap-2 rounded-xl bg-primary px-6 py-3 text-sm font-semibold text-primary-foreground transition-all hover:scale-105 disabled:opacity-50 disabled:hover:scale-100"
             >
-              {loading ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
-                <Play className="h-4 w-4" />
-              )}
+              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
               {loading ? "Fetching..." : "Fetch"}
             </button>
           </div>
@@ -132,76 +126,57 @@ const PlayerSection = () => {
           )}
         </div>
 
-        {/* Video Player Area */}
+        {/* Video Result */}
         {videoData && activeVideo && (
           <div className="mx-auto mt-10 max-w-4xl animate-in fade-in slide-in-from-bottom-4 duration-500">
             <div className="overflow-hidden rounded-2xl border border-border bg-card">
-              {/* Video Player */}
-              <div className="relative aspect-video bg-muted/30">
-                {showPlayer && videoData.surl ? (
-                  <iframe
-                    src={getEmbedUrl()}
-                    className="h-full w-full"
-                    allow="autoplay; fullscreen; encrypted-media"
-                    allowFullScreen
-                    referrerPolicy="no-referrer"
-                    title={activeVideo.name}
-                    style={{ border: 'none' }}
-                  />
+              {/* Thumbnail + Play */}
+              <div className="relative aspect-video bg-muted/30 cursor-pointer" onClick={handlePlayOnTeraBox}>
+                {activeVideo.thumbnail ? (
+                  <img src={activeVideo.thumbnail} alt={activeVideo.name} className="h-full w-full object-cover" />
                 ) : (
-                  <div
-                    className="relative h-full w-full cursor-pointer"
-                    onClick={handlePlay}
-                  >
-                    {activeVideo.thumbnail ? (
-                      <img
-                        src={activeVideo.thumbnail}
-                        alt={activeVideo.name}
-                        className="h-full w-full object-cover"
-                      />
-                    ) : (
-                      <div className="h-full w-full bg-muted/50" />
-                    )}
-                    <div className="absolute inset-0 flex items-center justify-center bg-background/30 transition-colors hover:bg-background/20">
-                      <div className="flex h-20 w-20 items-center justify-center rounded-full bg-primary shadow-lg transition-transform hover:scale-110">
-                        <Play className="ml-1 h-8 w-8 fill-primary-foreground text-primary-foreground" />
-                      </div>
-                    </div>
+                  <div className="flex h-full w-full items-center justify-center bg-muted/50">
+                    <FileVideo className="h-16 w-16 text-muted-foreground/40" />
                   </div>
                 )}
+                <div className="absolute inset-0 flex items-center justify-center bg-background/30 transition-colors hover:bg-background/20">
+                  <div className="flex h-20 w-20 items-center justify-center rounded-full bg-primary shadow-lg transition-transform hover:scale-110">
+                    <Play className="ml-1 h-8 w-8 fill-primary-foreground text-primary-foreground" />
+                  </div>
+                </div>
               </div>
 
               {/* Info Bar */}
               <div className="border-t border-border p-5">
                 <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                   <div className="min-w-0">
-                    <h3 className="truncate font-display font-semibold text-foreground">
-                      {activeVideo.name}
-                    </h3>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      Size: {activeVideo.size}
-                    </p>
+                    <h3 className="truncate font-display font-semibold text-foreground">{activeVideo.name}</h3>
+                    <p className="mt-1 text-sm text-muted-foreground">Size: {activeVideo.size}</p>
                   </div>
                   <div className="flex gap-3">
-                    {activeVideo.dlink && (
-                      <button
-                        onClick={() => handleDownload(activeVideo)}
-                        className="flex items-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-all hover:scale-105"
-                      >
-                        <Download className="h-4 w-4" />
-                        Download
-                      </button>
-                    )}
-                    <a
-                      href={url}
-                      target="_blank"
-                      rel="noopener noreferrer"
+                    <button
+                      onClick={() => handleDownload(activeVideo)}
+                      className="flex items-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-all hover:scale-105"
+                    >
+                      <Download className="h-4 w-4" />
+                      Download
+                    </button>
+                    <button
+                      onClick={handlePlayOnTeraBox}
                       className="flex items-center gap-2 rounded-xl border border-border px-4 py-2.5 text-sm font-medium text-muted-foreground transition-all hover:text-foreground"
                     >
                       <ExternalLink className="h-4 w-4" />
-                      TeraBox
-                    </a>
+                      Play on TeraBox
+                    </button>
                   </div>
+                </div>
+
+                {/* Info note */}
+                <div className="mt-4 flex items-start gap-2 rounded-lg bg-primary/5 border border-primary/10 px-4 py-3">
+                  <Info className="h-4 w-4 shrink-0 text-primary mt-0.5" />
+                  <p className="text-xs text-muted-foreground">
+                    Click <strong className="text-foreground">Play</strong> to watch on TeraBox, or <strong className="text-foreground">Download</strong> to save the video. If the download link has expired, use "Play on TeraBox" to access the video directly.
+                  </p>
                 </div>
               </div>
             </div>
@@ -215,11 +190,9 @@ const PlayerSection = () => {
                 {videoData.files.map((file) => (
                   <button
                     key={file.fsId}
-                    onClick={() => { setActiveVideo(file); setShowPlayer(false); }}
+                    onClick={() => setActiveVideo(file)}
                     className={`flex w-full items-center gap-4 rounded-xl border p-4 text-left transition-all ${
-                      activeVideo.fsId === file.fsId
-                        ? "border-primary/50 bg-primary/5"
-                        : "border-border bg-card hover:border-primary/30"
+                      activeVideo.fsId === file.fsId ? "border-primary/50 bg-primary/5" : "border-border bg-card hover:border-primary/30"
                     }`}
                   >
                     {file.thumbnail ? (
@@ -231,15 +204,10 @@ const PlayerSection = () => {
                       <p className="truncate text-sm font-medium">{file.name}</p>
                       <p className="text-xs text-muted-foreground">{file.size}</p>
                     </div>
-                    {file.dlink && (
-                      <Download
-                        className="h-4 w-4 shrink-0 text-muted-foreground hover:text-primary cursor-pointer"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDownload(file);
-                        }}
-                      />
-                    )}
+                    <Download
+                      className="h-4 w-4 shrink-0 text-muted-foreground hover:text-primary cursor-pointer"
+                      onClick={(e) => { e.stopPropagation(); handleDownload(file); }}
+                    />
                   </button>
                 ))}
               </div>

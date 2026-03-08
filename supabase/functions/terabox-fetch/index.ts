@@ -4,7 +4,7 @@ const corsHeaders = {
 };
 
 const TERA_API = 'https://tera-core.vercel.app';
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -12,7 +12,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { url, action } = await req.json();
+    const { url } = await req.json();
 
     if (!url) {
       return new Response(
@@ -21,96 +21,47 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Extract surl from the URL
+    // Extract surl
     let surl = '';
     try {
       const urlObj = new URL(url.trim());
       surl = urlObj.searchParams.get('surl') || '';
       if (!surl) {
         const pathMatch = urlObj.pathname.match(/\/s\/(.+)/);
-        if (pathMatch) {
-          surl = pathMatch[1];
-        }
+        if (pathMatch) surl = pathMatch[1];
       }
     } catch {
       return new Response(
-        JSON.stringify({ success: false, error: 'Invalid URL format' }),
+        JSON.stringify({ success: false, error: 'Invalid URL' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
     if (!surl) {
       return new Response(
-        JSON.stringify({ success: false, error: 'Could not extract share code from URL' }),
+        JSON.stringify({ success: false, error: 'Could not extract share code' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    console.log('Processing surl:', surl, 'action:', action);
+    console.log('Fetching info for surl:', surl);
 
-    // If action is "stream", return HLS stream URL
-    if (action === 'stream') {
-      const qualities = ['M3U8_AUTO_720', 'M3U8_AUTO_480', 'M3U8_AUTO_360'];
-      
-      for (const quality of qualities) {
-        try {
-          const streamUrl = `${TERA_API}/api?mode=stream&surl=${encodeURIComponent(surl)}&type=${quality}`;
-          console.log('Trying stream quality:', quality);
-          const streamRes = await fetch(streamUrl, { headers: { 'User-Agent': UA } });
-          
-          if (streamRes.ok) {
-            const contentType = streamRes.headers.get('content-type') || '';
-            const body = await streamRes.text();
-            
-            if (body.includes('#EXTM3U') || contentType.includes('mpegurl')) {
-              console.log('HLS stream available at quality:', quality);
-              return new Response(
-                JSON.stringify({
-                  success: true,
-                  data: {
-                    streamUrl,
-                    quality,
-                    type: 'hls',
-                  }
-                }),
-                { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-              );
-            }
-          } else {
-            await streamRes.text();
-          }
-        } catch (e) {
-          console.log('Stream quality failed:', quality, e);
-        }
-      }
-
-      return new Response(
-        JSON.stringify({ success: false, error: 'HLS stream not available for this video' }),
-        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // Default: fetch file info
+    // Get file info from tera-core
     const api2Url = `${TERA_API}/api2?url=${encodeURIComponent(url.trim())}`;
-    console.log('Fetching file info from api2');
-    
-    const api2Res = await fetch(api2Url, { headers: { 'User-Agent': UA } });
-    const api2Data = await api2Res.json();
+    const apiRes = await fetch(api2Url, { headers: { 'User-Agent': UA } });
+    const apiData = await apiRes.json();
 
-    if (api2Data.status === 'success' && api2Data.files?.length > 0) {
-      const files = api2Data.files.map((f: any) => ({
-        name: f.filename || f.name || f.server_filename || 'Unknown',
+    if (apiData.status === 'success' && apiData.files?.length > 0) {
+      const files = apiData.files.map((f: any) => ({
+        name: f.filename || f.name || 'Unknown',
         size: f.size || formatSize(f.size_bytes || 0),
         sizeBytes: f.size_bytes || 0,
         thumbnail: f.thumbnails?.original || f.thumbnail || '',
-        isVideo: isVideoFile(f.filename || f.name || f.server_filename || ''),
+        isVideo: isVideoFile(f.filename || f.name || ''),
         dlink: f.download_link || f.dlink || '',
         fsId: String(f.fs_id || Math.random()),
       }));
 
-      // Build stream URL for the player (will be fetched separately by client)
-      const streamBaseUrl = `${TERA_API}/api?mode=stream&surl=${encodeURIComponent(surl)}&type=M3U8_AUTO_720`;
-
       return new Response(
         JSON.stringify({
           success: true,
@@ -118,40 +69,6 @@ Deno.serve(async (req) => {
             title: files[0]?.name || 'TeraBox Video',
             files,
             surl,
-            streamUrl: streamBaseUrl,
-          }
-        }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // Fallback: try resolve mode
-    const resolveUrl = `${TERA_API}/api?mode=resolve&surl=${encodeURIComponent(surl)}`;
-    console.log('Trying resolve mode');
-    const resolveRes = await fetch(resolveUrl, { headers: { 'User-Agent': UA } });
-    const resolveData = await resolveRes.json();
-
-    if (resolveData.errno === 0 && resolveData.list?.length > 0) {
-      const files = resolveData.list.map((f: any) => ({
-        name: f.server_filename || 'Unknown',
-        size: formatSize(f.size || 0),
-        sizeBytes: f.size || 0,
-        thumbnail: f.thumbs?.url3 || f.thumbs?.url2 || '',
-        isVideo: isVideoFile(f.server_filename || ''),
-        dlink: f.dlink || '',
-        fsId: String(f.fs_id || Math.random()),
-      }));
-
-      const streamBaseUrl = `${TERA_API}/api?mode=stream&surl=${encodeURIComponent(surl)}&type=M3U8_AUTO_720`;
-
-      return new Response(
-        JSON.stringify({
-          success: true,
-          data: {
-            title: files[0]?.name || 'TeraBox Video',
-            files,
-            surl,
-            streamUrl: streamBaseUrl,
           }
         }),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -159,7 +76,7 @@ Deno.serve(async (req) => {
     }
 
     return new Response(
-      JSON.stringify({ success: false, error: 'Could not fetch video data. Link may be expired or invalid.' }),
+      JSON.stringify({ success: false, error: 'Could not fetch video data' }),
       { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
 
