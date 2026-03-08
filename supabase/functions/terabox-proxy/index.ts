@@ -6,7 +6,7 @@ const corsHeaders = {
 };
 
 const TERA_API = 'https://tera-core.vercel.app';
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -16,74 +16,94 @@ Deno.serve(async (req) => {
   try {
     const url = new URL(req.url);
     const surl = url.searchParams.get('surl');
+    const type = url.searchParams.get('type') || 'm3u8'; // m3u8, segment
+    const segmentUrl = url.searchParams.get('url'); // for segment proxy
 
-    if (!surl) {
-      return new Response('Missing surl parameter', { status: 400, headers: corsHeaders });
+    if (!surl && !segmentUrl) {
+      return new Response('Missing parameters', { status: 400, headers: corsHeaders });
     }
 
-    console.log('Proxy request for surl:', surl);
-
-    // Get fresh download link from API
-    const fakeTeraUrl = `https://www.terabox.app/sharing/link?surl=${surl}`;
-    const api2Url = `${TERA_API}/api2?url=${encodeURIComponent(fakeTeraUrl)}`;
-    
-    const apiRes = await fetch(api2Url, { headers: { 'User-Agent': UA } });
-    const apiData = await apiRes.json();
-
-    if (apiData.status !== 'success' || !apiData.files?.length) {
-      return new Response(JSON.stringify({ error: 'Could not get video link' }), {
-        status: 404,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    // Proxy a video segment
+    if (type === 'segment' && segmentUrl) {
+      console.log('Proxying segment');
+      const decoded = decodeURIComponent(segmentUrl);
+      const segRes = await fetch(decoded, {
+        headers: { 'User-Agent': UA },
+        redirect: 'follow',
+      });
+      
+      const responseHeaders: Record<string, string> = { ...corsHeaders };
+      const ct = segRes.headers.get('content-type');
+      if (ct) responseHeaders['Content-Type'] = ct;
+      const cl = segRes.headers.get('content-length');
+      if (cl) responseHeaders['Content-Length'] = cl;
+      
+      return new Response(segRes.body, {
+        status: segRes.status,
+        headers: responseHeaders,
       });
     }
 
-    const dlink = apiData.files[0].download_link || apiData.files[0].dlink;
-    if (!dlink) {
-      return new Response(JSON.stringify({ error: 'No download link available' }), {
-        status: 404,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    // Proxy M3U8 playlist with rewritten URLs
+    if (type === 'm3u8' && surl) {
+      const quality = url.searchParams.get('quality') || 'M3U8_AUTO_720';
+      const streamUrl = `${TERA_API}/api?mode=stream&surl=${encodeURIComponent(surl)}&type=${quality}`;
+      console.log('Fetching M3U8:', streamUrl);
+      
+      const m3u8Res = await fetch(streamUrl, {
+        headers: { 'User-Agent': UA },
+      });
+
+      if (!m3u8Res.ok) {
+        const errBody = await m3u8Res.text();
+        console.error('M3U8 fetch failed:', m3u8Res.status, errBody.slice(0, 200));
+        
+        // Try lower quality
+        if (quality === 'M3U8_AUTO_720') {
+          const fallbackUrl = `${TERA_API}/api?mode=stream&surl=${encodeURIComponent(surl)}&type=M3U8_AUTO_480`;
+          console.log('Trying 480p fallback');
+          const fbRes = await fetch(fallbackUrl, { headers: { 'User-Agent': UA } });
+          if (fbRes.ok) {
+            const fbContent = await fbRes.text();
+            if (fbContent.includes('#EXTM3U')) {
+              const rewritten = rewriteM3U8(fbContent, req.url, surl);
+              return new Response(rewritten, {
+                headers: { ...corsHeaders, 'Content-Type': 'application/vnd.apple.mpegurl' },
+              });
+            }
+          }
+          await fbRes.text();
+        }
+        
+        return new Response(JSON.stringify({ error: 'Stream not available' }), {
+          status: 404,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      const m3u8Content = await m3u8Res.text();
+      
+      if (!m3u8Content.includes('#EXTM3U')) {
+        console.error('Not a valid M3U8:', m3u8Content.slice(0, 100));
+        return new Response(JSON.stringify({ error: 'Invalid stream response' }), {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      console.log('Got valid M3U8, rewriting URLs');
+      const rewritten = rewriteM3U8(m3u8Content, req.url, surl);
+      
+      return new Response(rewritten, {
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'application/vnd.apple.mpegurl',
+          'Cache-Control': 'no-cache',
+        },
       });
     }
 
-    console.log('Got fresh download link, proxying video...');
-
-    // Forward range header for seeking support
-    const rangeHeader = req.headers.get('range');
-    const fetchHeaders: Record<string, string> = {
-      'User-Agent': UA,
-      'Referer': 'https://www.terabox.app/',
-    };
-    if (rangeHeader) {
-      fetchHeaders['Range'] = rangeHeader;
-    }
-
-    // Fetch video from TeraBox
-    const videoRes = await fetch(dlink, {
-      headers: fetchHeaders,
-      redirect: 'follow',
-    });
-
-    console.log('TeraBox response status:', videoRes.status);
-
-    // Build response headers
-    const responseHeaders: Record<string, string> = { ...corsHeaders };
-    
-    const contentType = videoRes.headers.get('content-type');
-    if (contentType) responseHeaders['Content-Type'] = contentType;
-    
-    const contentLength = videoRes.headers.get('content-length');
-    if (contentLength) responseHeaders['Content-Length'] = contentLength;
-    
-    const contentRange = videoRes.headers.get('content-range');
-    if (contentRange) responseHeaders['Content-Range'] = contentRange;
-
-    const acceptRanges = videoRes.headers.get('accept-ranges');
-    if (acceptRanges) responseHeaders['Accept-Ranges'] = acceptRanges;
-
-    return new Response(videoRes.body, {
-      status: videoRes.status,
-      headers: responseHeaders,
-    });
+    return new Response('Invalid request', { status: 400, headers: corsHeaders });
 
   } catch (error) {
     console.error('Proxy error:', error);
@@ -93,3 +113,29 @@ Deno.serve(async (req) => {
     });
   }
 });
+
+function rewriteM3U8(content: string, reqUrl: string, surl: string): string {
+  // Get the base URL for our proxy
+  const url = new URL(reqUrl);
+  const proxyBase = `${url.origin}${url.pathname}`;
+  
+  // Rewrite segment URLs to go through our proxy
+  const lines = content.split('\n');
+  const rewritten = lines.map(line => {
+    const trimmed = line.trim();
+    // If it's a URL line (not a comment/tag), rewrite it
+    if (trimmed && !trimmed.startsWith('#')) {
+      if (trimmed.startsWith('http')) {
+        // Absolute URL - proxy through our edge function
+        return `${proxyBase}?surl=${surl}&type=segment&url=${encodeURIComponent(trimmed)}`;
+      } else if (trimmed.endsWith('.ts') || trimmed.endsWith('.m4s') || trimmed.includes('.ts?')) {
+        // Relative URL - construct full URL via tera-core segment proxy
+        const segUrl = `${TERA_API}/api?mode=segment&url=${encodeURIComponent(trimmed)}`;
+        return `${proxyBase}?surl=${surl}&type=segment&url=${encodeURIComponent(segUrl)}`;
+      }
+    }
+    return line;
+  });
+  
+  return rewritten.join('\n');
+}
