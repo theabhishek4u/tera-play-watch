@@ -3,8 +3,7 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version',
 };
 
-const TERA_API = 'https://tera-core.vercel.app';
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -12,7 +11,7 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { url, action } = await req.json();
+    const { url } = await req.json();
 
     if (!url) {
       return new Response(
@@ -21,16 +20,14 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Extract surl from the URL
+    // Extract surl
     let surl = '';
     try {
       const urlObj = new URL(url.trim());
       surl = urlObj.searchParams.get('surl') || '';
       if (!surl) {
         const pathMatch = urlObj.pathname.match(/\/s\/(.+)/);
-        if (pathMatch) {
-          surl = pathMatch[1];
-        }
+        if (pathMatch) surl = pathMatch[1];
       }
     } catch {
       return new Response(
@@ -46,121 +43,163 @@ Deno.serve(async (req) => {
       );
     }
 
-    console.log('Processing surl:', surl, 'action:', action);
+    console.log('Fetching fresh data for surl:', surl);
 
-    // If action is "stream", return HLS stream URL
-    if (action === 'stream') {
-      const qualities = ['M3U8_AUTO_720', 'M3U8_AUTO_480', 'M3U8_AUTO_360'];
-      
-      for (const quality of qualities) {
-        try {
-          const streamUrl = `${TERA_API}/api?mode=stream&surl=${encodeURIComponent(surl)}&type=${quality}`;
-          console.log('Trying stream quality:', quality);
-          const streamRes = await fetch(streamUrl, { headers: { 'User-Agent': UA } });
-          
-          if (streamRes.ok) {
-            const contentType = streamRes.headers.get('content-type') || '';
-            const body = await streamRes.text();
-            
-            if (body.includes('#EXTM3U') || contentType.includes('mpegurl')) {
-              console.log('HLS stream available at quality:', quality);
-              return new Response(
-                JSON.stringify({
-                  success: true,
-                  data: {
-                    streamUrl,
-                    quality,
-                    type: 'hls',
-                  }
-                }),
-                { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-              );
-            }
-          } else {
-            await streamRes.text();
-          }
-        } catch (e) {
-          console.log('Stream quality failed:', quality, e);
-        }
+    // Step 1: Fetch the share page to get jsToken and cookies
+    const pageUrl = `https://www.terabox.app/wap/share/filelist?surl=${surl}`;
+    console.log('Fetching page:', pageUrl);
+    
+    const pageRes = await fetch(pageUrl, {
+      headers: {
+        'User-Agent': UA,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      redirect: 'follow',
+    });
+
+    const pageHtml = await pageRes.text();
+    
+    // Extract cookies from response
+    const cookies = pageRes.headers.getSetCookie?.() || [];
+    const cookieStr = cookies.map(c => c.split(';')[0]).join('; ');
+    console.log('Got cookies:', cookieStr ? 'yes' : 'no');
+
+    // Extract jsToken from page
+    const jsTokenMatch = pageHtml.match(/fn%28%22(.*?)%22%29/) || 
+                         pageHtml.match(/jsToken.*?=.*?"(.*?)"/) ||
+                         pageHtml.match(/window\.jsToken\s*=\s*"(.*?)"/) ||
+                         pageHtml.match(/"jsToken"\s*:\s*"(.*?)"/);
+    
+    let jsToken = '';
+    if (jsTokenMatch) {
+      jsToken = decodeURIComponent(jsTokenMatch[1] || jsTokenMatch[0]);
+      console.log('Found jsToken:', jsToken.slice(0, 20) + '...');
+    } else {
+      console.log('jsToken not found in page, trying alternative extraction...');
+      // Try to find it in a different format
+      const fnMatch = pageHtml.match(/fn\("([^"]+)"\)/);
+      if (fnMatch) {
+        jsToken = fnMatch[1];
+        console.log('Found jsToken via fn():', jsToken.slice(0, 20) + '...');
       }
+    }
 
+    // Extract other data from the page (look for window.__INITIAL_STATE__ or similar)
+    const dataMatch = pageHtml.match(/window\.__INITIAL_STATE__\s*=\s*({.*?});/) ||
+                      pageHtml.match(/"shareid"\s*:\s*(\d+).*?"uk"\s*:\s*(\d+)/);
+
+    let shareid = '', uk = '', sign = '', timestamp = '';
+    
+    const shareidMatch = pageHtml.match(/"shareid"\s*:\s*(\d+)/);
+    const ukMatch = pageHtml.match(/"uk"\s*:\s*(\d+)/);
+    const signMatch = pageHtml.match(/"sign"\s*:\s*"([^"]+)"/);
+    const timestampMatch = pageHtml.match(/"timestamp"\s*:\s*(\d+)/);
+
+    if (shareidMatch) shareid = shareidMatch[1];
+    if (ukMatch) uk = ukMatch[1];
+    if (signMatch) sign = signMatch[1];
+    if (timestampMatch) timestamp = timestampMatch[1];
+
+    console.log('Extracted: shareid=', shareid, 'uk=', uk, 'sign=', sign ? 'yes' : 'no');
+
+    // Step 2: Use TeraBox API with jsToken to get file list
+    const apiHeaders: Record<string, string> = {
+      'User-Agent': UA,
+      'Accept': 'application/json',
+      'Referer': `https://www.terabox.app/wap/share/filelist?surl=${surl}`,
+    };
+    if (cookieStr) apiHeaders['Cookie'] = cookieStr;
+
+    let fileList: any[] = [];
+
+    // Try using shorturlinfo API with cookies
+    const infoUrl = `https://www.terabox.app/api/shorturlinfo?app_id=250528&shorturl=${encodeURIComponent(surl)}&root=1`;
+    console.log('Fetching file info with cookies...');
+    
+    const infoRes = await fetch(infoUrl, { headers: apiHeaders });
+    const infoData = await infoRes.json();
+    
+    console.log('shorturlinfo errno:', infoData.errno);
+
+    if (infoData.errno === 0 && infoData.list?.length > 0) {
+      shareid = shareid || String(infoData.shareid || '');
+      uk = uk || String(infoData.uk || '');
+      sign = sign || infoData.sign || '';
+      timestamp = timestamp || String(infoData.timestamp || '');
+      fileList = infoData.list;
+    }
+
+    if (fileList.length === 0) {
+      // Try alternative domain
+      const altInfoUrl = `https://www.1024tera.com/api/shorturlinfo?app_id=250528&shorturl=${encodeURIComponent(surl)}&root=1`;
+      const altRes = await fetch(altInfoUrl, { headers: { ...apiHeaders, 'Referer': 'https://www.1024tera.com/' } });
+      const altData = await altRes.json();
+      console.log('alt shorturlinfo errno:', altData.errno);
+      
+      if (altData.errno === 0 && altData.list?.length > 0) {
+        shareid = String(altData.shareid || '');
+        uk = String(altData.uk || '');
+        sign = altData.sign || '';
+        timestamp = String(altData.timestamp || '');
+        fileList = altData.list;
+      }
+    }
+
+    if (fileList.length === 0) {
       return new Response(
-        JSON.stringify({ success: false, error: 'HLS stream not available for this video' }),
+        JSON.stringify({ success: false, error: 'Could not fetch files. The link may be expired or invalid.' }),
         { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
-    // Default: fetch file info
-    const api2Url = `${TERA_API}/api2?url=${encodeURIComponent(url.trim())}`;
-    console.log('Fetching file info from api2');
+    // Step 3: Get fresh download links
+    const fsIds = fileList.map((f: any) => f.fs_id);
     
-    const api2Res = await fetch(api2Url, { headers: { 'User-Agent': UA } });
-    const api2Data = await api2Res.json();
-
-    if (api2Data.status === 'success' && api2Data.files?.length > 0) {
-      const files = api2Data.files.map((f: any) => ({
-        name: f.filename || f.name || f.server_filename || 'Unknown',
-        size: f.size || formatSize(f.size_bytes || 0),
-        sizeBytes: f.size_bytes || 0,
-        thumbnail: f.thumbnails?.original || f.thumbnail || '',
-        isVideo: isVideoFile(f.filename || f.name || f.server_filename || ''),
-        dlink: f.download_link || f.dlink || '',
-        fsId: String(f.fs_id || Math.random()),
-      }));
-
-      // Build stream URL for the player (will be fetched separately by client)
-      const streamBaseUrl = `${TERA_API}/api?mode=stream&surl=${encodeURIComponent(surl)}&type=M3U8_AUTO_720`;
-
-      return new Response(
-        JSON.stringify({
-          success: true,
-          data: {
-            title: files[0]?.name || 'TeraBox Video',
-            files,
-            surl,
-            streamUrl: streamBaseUrl,
+    let downloadLinks: Record<string, string> = {};
+    
+    if (shareid && uk && sign && timestamp) {
+      const dlUrl = `https://www.terabox.app/api/sharedownload?app_id=250528&shareid=${shareid}&uk=${uk}&sign=${sign}&timestamp=${timestamp}&fid_list=[${fsIds.join(',')}]`;
+      console.log('Fetching download links...');
+      
+      const dlRes = await fetch(dlUrl, { headers: apiHeaders });
+      const dlData = await dlRes.json();
+      console.log('sharedownload errno:', dlData.errno);
+      
+      if (dlData.errno === 0 && dlData.list) {
+        dlData.list.forEach((item: any) => {
+          if (item.dlink) {
+            downloadLinks[String(item.fs_id)] = item.dlink;
           }
-        }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
+        });
+      }
     }
 
-    // Fallback: try resolve mode
-    const resolveUrl = `${TERA_API}/api?mode=resolve&surl=${encodeURIComponent(surl)}`;
-    console.log('Trying resolve mode');
-    const resolveRes = await fetch(resolveUrl, { headers: { 'User-Agent': UA } });
-    const resolveData = await resolveRes.json();
-
-    if (resolveData.errno === 0 && resolveData.list?.length > 0) {
-      const files = resolveData.list.map((f: any) => ({
-        name: f.server_filename || 'Unknown',
-        size: formatSize(f.size || 0),
-        sizeBytes: f.size || 0,
-        thumbnail: f.thumbs?.url3 || f.thumbs?.url2 || '',
-        isVideo: isVideoFile(f.server_filename || ''),
-        dlink: f.dlink || '',
-        fsId: String(f.fs_id || Math.random()),
-      }));
-
-      const streamBaseUrl = `${TERA_API}/api?mode=stream&surl=${encodeURIComponent(surl)}&type=M3U8_AUTO_720`;
-
-      return new Response(
-        JSON.stringify({
-          success: true,
-          data: {
-            title: files[0]?.name || 'TeraBox Video',
-            files,
-            surl,
-            streamUrl: streamBaseUrl,
-          }
-        }),
-        { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-      );
-    }
+    // Build response
+    const files = fileList.map((f: any) => ({
+      name: f.server_filename || 'Unknown',
+      size: formatSize(f.size || 0),
+      sizeBytes: f.size || 0,
+      thumbnail: f.thumbs?.url3 || f.thumbs?.url2 || f.thumbs?.url1 || '',
+      isVideo: isVideoFile(f.server_filename || ''),
+      dlink: downloadLinks[String(f.fs_id)] || f.dlink || '',
+      fsId: String(f.fs_id),
+    }));
 
     return new Response(
-      JSON.stringify({ success: false, error: 'Could not fetch video data. Link may be expired or invalid.' }),
-      { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      JSON.stringify({
+        success: true,
+        data: {
+          title: files[0]?.name || 'TeraBox Video',
+          files,
+          surl,
+          shareid,
+          uk,
+          sign,
+          timestamp,
+        }
+      }),
+      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     );
 
   } catch (error) {
