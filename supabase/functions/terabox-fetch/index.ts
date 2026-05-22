@@ -118,15 +118,26 @@ async function fetchWithCookie(surl: string, ndus: string): Promise<{ title: str
     'Accept': 'application/json, text/plain, */*',
   };
 
-  // 1) shorturlinfo to get shareid + uk + file list
-  const infoUrl = `https://www.terabox.com/api/shorturlinfo?app_id=250528&shorturl=1${surl}&root=1`;
-  const infoRes = await fetch(infoUrl, { headers: baseHeaders });
-  if (!infoRes.ok) throw new Error(`shorturlinfo ${infoRes.status}`);
-  const info = await infoRes.json();
-  console.log('shorturlinfo errno:', info?.errno);
-  if (info?.errno !== 0 || !info?.list?.length) {
-    throw new Error(`shorturlinfo errno ${info?.errno}`);
+  // 1) shorturlinfo — try multiple host + shorturl format combos
+  const hosts = ['https://www.terabox.com', 'https://www.terabox.app', 'https://dm.terabox.app', 'https://www.1024tera.com'];
+  const shorturlVariants = [surl.startsWith('1') ? surl : `1${surl}`, surl];
+  let info: any = null;
+  for (const host of hosts) {
+    for (const sv of shorturlVariants) {
+      try {
+        const infoUrl = `${host}/api/shorturlinfo?app_id=250528&web=1&channel=dubox&clienttype=0&shorturl=${encodeURIComponent(sv)}&root=1`;
+        const r = await fetch(infoUrl, { headers: { ...baseHeaders, Referer: host + '/' } });
+        if (!r.ok) { console.log(`shorturlinfo ${host} ${sv} http ${r.status}`); continue; }
+        const d = await r.json();
+        console.log(`shorturlinfo ${host} sv=${sv} errno=${d?.errno} files=${d?.list?.length || 0}`);
+        if (d?.errno === 0 && d?.list?.length) { info = d; break; }
+      } catch (e) {
+        console.log('shorturlinfo error', e instanceof Error ? e.message : e);
+      }
+    }
+    if (info) break;
   }
+  if (!info) throw new Error('shorturlinfo: all variants rejected (check ndus cookie validity)');
 
   const shareid = info.shareid;
   const uk = info.uk;
