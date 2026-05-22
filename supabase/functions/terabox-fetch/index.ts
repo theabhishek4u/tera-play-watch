@@ -34,6 +34,15 @@ Deno.serve(async (req) => {
     const ndus = Deno.env.get('TERABOX_NDUS');
     if (ndus) {
       try {
+        const direct = await fetchFromSharePage(url.trim(), surl, ndus);
+        if (direct) {
+          console.log(`share-page success! Files: ${direct.files.length}`);
+          return jsonRes({ success: true, data: direct });
+        }
+      } catch (e) {
+        console.log('share-page failed:', e instanceof Error ? e.message : e);
+      }
+      try {
         const direct = await fetchWithCookie(surl, ndus);
         if (direct) {
           console.log(`cookie path success! Files: ${direct.files.length}`);
@@ -110,7 +119,100 @@ async function extractSurl(rawUrl: string): Promise<string> {
 }
 
 async function fetchWithCookie(surl: string, ndus: string): Promise<{ title: string; files: any[]; surl: string } | null> {
-  const cookie = `ndus=${ndus}`;
+  return _fetchWithCookieImpl(surl, ndus);
+}
+
+async function fetchFromSharePage(rawUrl: string, surl: string, ndus: string): Promise<{ title: string; files: any[]; surl: string } | null> {
+  let ndusVal = ndus.trim().replace(/^['"]|['"]$/g, '');
+  if (ndusVal.toLowerCase().startsWith('ndus=')) ndusVal = ndusVal.slice(5);
+  ndusVal = ndusVal.split(';')[0].trim();
+  const cookie = `ndus=${ndusVal}; lang=en;`;
+
+  const headers = {
+    'User-Agent': UA,
+    'Cookie': cookie,
+    'Accept': 'text/html,application/xhtml+xml',
+    'Accept-Language': 'en-US,en;q=0.9',
+  };
+
+  const res = await fetch(rawUrl, { headers, redirect: 'follow' });
+  if (!res.ok) throw new Error(`share page ${res.status}`);
+  const html = await res.text();
+
+  // Extract yunData (TeraBox embeds page state as JS object)
+  const yunMatch = html.match(/yunData\s*=\s*(\{[\s\S]*?\});?\s*(?:<\/script>|var\s|window\.)/);
+  if (!yunMatch) {
+    console.log('yunData not found in HTML (len=', html.length, ')');
+    throw new Error('yunData not found — link may need login or page changed');
+  }
+  let yunData: any;
+  try {
+    yunData = JSON.parse(yunMatch[1]);
+  } catch (e) {
+    throw new Error('yunData parse failed');
+  }
+
+  const shareid = yunData.SHARE_ID || yunData.shareid;
+  const uk = yunData.SHARE_UK || yunData.share_uk || yunData.uk;
+  const sign = yunData.SIGN || yunData.sign;
+  const timestamp = yunData.TIMESTAMP || yunData.timestamp;
+  const jsToken = yunData.MYJSTOKEN || yunData.jsToken;
+  const fileList: any[] = yunData.FILEINFO || yunData.file_list || [];
+
+  console.log('yunData parsed: shareid=', !!shareid, 'uk=', !!uk, 'sign=', !!sign, 'files=', fileList.length);
+
+  if (!fileList.length || !shareid || !uk || !sign) {
+    throw new Error('yunData missing required fields');
+  }
+
+  const baseHeaders = {
+    'User-Agent': UA,
+    'Cookie': cookie,
+    'Referer': rawUrl,
+    'Accept': 'application/json, text/plain, */*',
+  };
+
+  const files: any[] = [];
+  for (const item of fileList) {
+    let dlink = item.dlink || '';
+    if (!dlink) {
+      try {
+        const dlUrl = `https://www.terabox.com/share/download?app_id=250528&channel=dubox&clienttype=0&web=1&sign=${encodeURIComponent(sign)}&timestamp=${timestamp}${jsToken ? `&jsToken=${encodeURIComponent(jsToken)}` : ''}`;
+        const body = `encrypt=0&product=share&uk=${uk}&primaryid=${shareid}&fid_list=%5B${item.fs_id}%5D`;
+        const dlRes = await fetch(dlUrl, {
+          method: 'POST',
+          headers: { ...baseHeaders, 'Content-Type': 'application/x-www-form-urlencoded' },
+          body,
+        });
+        const dlData = await dlRes.json();
+        dlink = dlData?.list?.[0]?.dlink || '';
+        console.log('share/download errno:', dlData?.errno, 'has dlink:', !!dlink);
+      } catch (e) {
+        console.log('share/download error', e instanceof Error ? e.message : e);
+      }
+    }
+
+    files.push({
+      name: item.server_filename || item.filename || 'Unknown',
+      size: formatSize(Number(item.size) || 0),
+      sizeBytes: Number(item.size) || 0,
+      thumbnail: item.thumbs?.url3 || item.thumbs?.url2 || item.thumbs?.url1 || '',
+      isVideo: isVideoFile(item.server_filename || item.filename || ''),
+      dlink,
+      fsId: String(item.fs_id),
+    });
+  }
+
+  if (!files.some(f => f.dlink)) return null;
+  return { title: files[0]?.name || 'TeraBox File', files, surl };
+}
+
+async function _fetchWithCookieImpl(surl: string, ndus: string): Promise<{ title: string; files: any[]; surl: string } | null> {
+  // Sanitize: user may have pasted "ndus=VALUE" or wrapped in quotes
+  let ndusVal = ndus.trim().replace(/^['"]|['"]$/g, '');
+  if (ndusVal.toLowerCase().startsWith('ndus=')) ndusVal = ndusVal.slice(5);
+  ndusVal = ndusVal.split(';')[0].trim();
+  const cookie = `ndus=${ndusVal}; lang=en;`;
   const baseHeaders = {
     'User-Agent': UA,
     'Cookie': cookie,
@@ -118,15 +220,26 @@ async function fetchWithCookie(surl: string, ndus: string): Promise<{ title: str
     'Accept': 'application/json, text/plain, */*',
   };
 
-  // 1) shorturlinfo to get shareid + uk + file list
-  const infoUrl = `https://www.terabox.com/api/shorturlinfo?app_id=250528&shorturl=1${surl}&root=1`;
-  const infoRes = await fetch(infoUrl, { headers: baseHeaders });
-  if (!infoRes.ok) throw new Error(`shorturlinfo ${infoRes.status}`);
-  const info = await infoRes.json();
-  console.log('shorturlinfo errno:', info?.errno);
-  if (info?.errno !== 0 || !info?.list?.length) {
-    throw new Error(`shorturlinfo errno ${info?.errno}`);
+  // 1) shorturlinfo — try multiple host + shorturl format combos
+  const hosts = ['https://www.terabox.com', 'https://www.terabox.app', 'https://dm.terabox.app', 'https://www.1024tera.com'];
+  const shorturlVariants = [surl.startsWith('1') ? surl : `1${surl}`, surl];
+  let info: any = null;
+  for (const host of hosts) {
+    for (const sv of shorturlVariants) {
+      try {
+        const infoUrl = `${host}/api/shorturlinfo?app_id=250528&web=1&channel=dubox&clienttype=0&shorturl=${encodeURIComponent(sv)}&root=1`;
+        const r = await fetch(infoUrl, { headers: { ...baseHeaders, Referer: host + '/' } });
+        if (!r.ok) { console.log(`shorturlinfo ${host} ${sv} http ${r.status}`); continue; }
+        const d = await r.json();
+        console.log(`shorturlinfo ${host} sv=${sv} errno=${d?.errno} files=${d?.list?.length || 0}`);
+        if (d?.errno === 0 && d?.list?.length) { info = d; break; }
+      } catch (e) {
+        console.log('shorturlinfo error', e instanceof Error ? e.message : e);
+      }
+    }
+    if (info) break;
   }
+  if (!info) throw new Error('shorturlinfo: all variants rejected (check ndus cookie validity)');
 
   const shareid = info.shareid;
   const uk = info.uk;
