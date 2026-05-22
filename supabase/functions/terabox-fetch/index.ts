@@ -23,26 +23,30 @@ Deno.serve(async (req) => {
       return jsonRes({ success: false, error: 'URL is required' }, 400);
     }
 
-    // Extract surl
-    let surl = '';
-    try {
-      const urlObj = new URL(url.trim());
-      surl = urlObj.searchParams.get('surl') || '';
-      if (!surl) {
-        const pathMatch = urlObj.pathname.match(/\/s\/(.+)/);
-        if (pathMatch) surl = pathMatch[1];
-      }
-    } catch {
-      return jsonRes({ success: false, error: 'Invalid URL' }, 400);
-    }
-
+    const surl = await extractSurl(url.trim());
     if (!surl) {
-      return jsonRes({ success: false, error: 'Could not extract share code' }, 400);
+      return jsonRes({ success: false, error: 'Could not extract share code from URL' }, 400);
     }
 
     console.log('Fetching for surl:', surl);
 
-    // Try multiple APIs
+    // PRIMARY: use ndus cookie with official TeraBox API
+    const ndus = Deno.env.get('TERABOX_NDUS');
+    if (ndus) {
+      try {
+        const direct = await fetchWithCookie(surl, ndus);
+        if (direct) {
+          console.log(`cookie path success! Files: ${direct.files.length}`);
+          return jsonRes({ success: true, data: direct });
+        }
+      } catch (e) {
+        console.log('cookie path failed:', e instanceof Error ? e.message : e);
+      }
+    } else {
+      console.log('No TERABOX_NDUS cookie set — falling back to public APIs');
+    }
+
+    // FALLBACK: third-party APIs
     for (const api of APIS) {
       try {
         console.log(`Trying ${api.name}...`);
@@ -78,6 +82,95 @@ Deno.serve(async (req) => {
     return jsonRes({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }, 500);
   }
 });
+
+async function extractSurl(rawUrl: string): Promise<string> {
+  try {
+    let u = new URL(rawUrl);
+    // Follow shortener redirects (1024terabox, freeterabox short links)
+    if (/\/s\/[A-Za-z0-9_-]+/.test(u.pathname) || u.searchParams.get('surl')) {
+      let s = u.searchParams.get('surl') || '';
+      if (!s) {
+        const m = u.pathname.match(/\/s\/([A-Za-z0-9_-]+)/);
+        if (m) s = m[1].startsWith('1') ? m[1].slice(1) : m[1];
+      }
+      if (s) return s;
+    }
+    // Follow redirect to resolve final URL
+    const r = await fetch(rawUrl, { redirect: 'follow', headers: { 'User-Agent': UA } });
+    const finalUrl = new URL(r.url);
+    let s = finalUrl.searchParams.get('surl') || '';
+    if (!s) {
+      const m = finalUrl.pathname.match(/\/s\/([A-Za-z0-9_-]+)/);
+      if (m) s = m[1].startsWith('1') ? m[1].slice(1) : m[1];
+    }
+    return s;
+  } catch {
+    return '';
+  }
+}
+
+async function fetchWithCookie(surl: string, ndus: string): Promise<{ title: string; files: any[]; surl: string } | null> {
+  const cookie = `ndus=${ndus}`;
+  const baseHeaders = {
+    'User-Agent': UA,
+    'Cookie': cookie,
+    'Referer': 'https://www.terabox.com/',
+    'Accept': 'application/json, text/plain, */*',
+  };
+
+  // 1) shorturlinfo to get shareid + uk + file list
+  const infoUrl = `https://www.terabox.com/api/shorturlinfo?app_id=250528&shorturl=1${surl}&root=1`;
+  const infoRes = await fetch(infoUrl, { headers: baseHeaders });
+  if (!infoRes.ok) throw new Error(`shorturlinfo ${infoRes.status}`);
+  const info = await infoRes.json();
+  console.log('shorturlinfo errno:', info?.errno);
+  if (info?.errno !== 0 || !info?.list?.length) {
+    throw new Error(`shorturlinfo errno ${info?.errno}`);
+  }
+
+  const shareid = info.shareid;
+  const uk = info.uk;
+  const sign = info.sign;
+  const timestamp = info.timestamp;
+
+  const files: any[] = [];
+  for (const item of info.list) {
+    let dlink = '';
+    try {
+      // 2) get real download link
+      const dlUrl = `https://www.terabox.com/share/download?app_id=250528&channel=dubox&clienttype=0&web=1&sign=${encodeURIComponent(sign)}&timestamp=${timestamp}`;
+      const body = `encrypt=0&product=share&uk=${uk}&primaryid=${shareid}&fid_list=%5B${item.fs_id}%5D`;
+      const dlRes = await fetch(dlUrl, {
+        method: 'POST',
+        headers: { ...baseHeaders, 'Content-Type': 'application/x-www-form-urlencoded' },
+        body,
+      });
+      const dlData = await dlRes.json();
+      dlink = dlData?.list?.[0]?.dlink || '';
+      console.log('share/download errno:', dlData?.errno, 'has dlink:', !!dlink);
+    } catch (e) {
+      console.log('share/download error', e instanceof Error ? e.message : e);
+    }
+
+    files.push({
+      name: item.server_filename || 'Unknown',
+      size: formatSize(Number(item.size) || 0),
+      sizeBytes: Number(item.size) || 0,
+      thumbnail: item.thumbs?.url3 || item.thumbs?.url2 || item.thumbs?.url1 || '',
+      isVideo: isVideoFile(item.server_filename || ''),
+      dlink,
+      fsId: String(item.fs_id),
+    });
+  }
+
+  if (!files.some(f => f.dlink)) return null;
+
+  return {
+    title: info.title || files[0]?.name || 'TeraBox File',
+    files,
+    surl,
+  };
+}
 
 function parseApiResponse(apiName: string, data: any, surl: string): { title: string; files: any[]; surl: string } | null {
   // Ashlynn / darkhacker format: { file_name, download_link, thumb, size, sizebytes }
