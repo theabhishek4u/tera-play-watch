@@ -34,6 +34,15 @@ Deno.serve(async (req) => {
     const ndus = Deno.env.get('TERABOX_NDUS');
     if (ndus) {
       try {
+        const direct = await fetchFromSharePage(url.trim(), surl, ndus);
+        if (direct) {
+          console.log(`share-page success! Files: ${direct.files.length}`);
+          return jsonRes({ success: true, data: direct });
+        }
+      } catch (e) {
+        console.log('share-page failed:', e instanceof Error ? e.message : e);
+      }
+      try {
         const direct = await fetchWithCookie(surl, ndus);
         if (direct) {
           console.log(`cookie path success! Files: ${direct.files.length}`);
