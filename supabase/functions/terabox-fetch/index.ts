@@ -110,7 +110,11 @@ async function extractSurl(rawUrl: string): Promise<string> {
 }
 
 async function fetchWithCookie(surl: string, ndus: string): Promise<{ title: string; files: any[]; surl: string } | null> {
-  const cookie = `ndus=${ndus}`;
+  // Sanitize: user may have pasted "ndus=VALUE" or wrapped in quotes
+  let ndusVal = ndus.trim().replace(/^['"]|['"]$/g, '');
+  if (ndusVal.toLowerCase().startsWith('ndus=')) ndusVal = ndusVal.slice(5);
+  ndusVal = ndusVal.split(';')[0].trim();
+  const cookie = `ndus=${ndusVal}; lang=en;`;
   const baseHeaders = {
     'User-Agent': UA,
     'Cookie': cookie,
