@@ -50,12 +50,12 @@ const PlayerSection = () => {
       });
 
       if (fnError) {
-        setError(fnError.message || "Failed to fetch video data");
+        setError("TeraBox link fetch failed. Please refresh the TeraBox session cookie in backend secrets and try again.");
         return;
       }
 
       if (!data?.success) {
-        setError(data?.error || "Could not fetch video from TeraBox");
+        setError(data?.error || "Could not fetch video from TeraBox. Please try another public TeraBox link.");
         return;
       }
 

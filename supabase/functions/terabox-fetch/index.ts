@@ -84,11 +84,21 @@ Deno.serve(async (req) => {
       }
     }
 
-    return jsonRes({ success: false, error: 'All APIs failed. Please try again later.' }, 400);
+    return jsonRes({
+      success: false,
+      fallback: true,
+      error: 'TeraBox could not generate a playable link right now. The saved TeraBox session may be expired, or the share link may need login/access permission.',
+      code: 'TERABOX_LINK_FETCH_FAILED',
+    });
 
   } catch (error) {
     console.error('Error:', error);
-    return jsonRes({ success: false, error: error instanceof Error ? error.message : 'Unknown error' }, 500);
+    return jsonRes({
+      success: false,
+      fallback: true,
+      error: error instanceof Error ? error.message : 'Unknown error',
+      code: 'TERABOX_FUNCTION_ERROR',
+    });
   }
 });
 
