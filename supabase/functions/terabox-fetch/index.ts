@@ -238,6 +238,29 @@ function buildFilesFromList(list: any[], surl: string, source: any): any[] {
   }));
 }
 
+function parseShareParamsFromHtml(html: string): any | null {
+  const script = html.match(/<script[^>]*>([\s\S]*?file_list[\s\S]*?)<\/script>/)?.[1] || html;
+  const fileListMatch = script.match(/"file_list"\s*:\s*(\[[\s\S]*?\])\s*,\s*"(?:shareid|share_id|uk|sign|timestamp)"/)
+    || script.match(/"file_list"\s*:\s*(\[[\s\S]*?\])/);
+  const shareIdMatch = script.match(/"shareid"\s*:\s*"?([^",}]+)"?/) || script.match(/"share_id"\s*:\s*"?([^",}]+)"?/);
+  const ukMatch = script.match(/"uk"\s*:\s*"?([^",}]+)"?/);
+  const signMatch = script.match(/"sign"\s*:\s*"([^"]+)"/);
+  const timestampMatch = script.match(/"timestamp"\s*:\s*"?([^",}]+)"?/);
+  if (!fileListMatch || !shareIdMatch || !ukMatch || !signMatch || !timestampMatch) return null;
+  try {
+    return {
+      shareid: shareIdMatch[1],
+      uk: ukMatch[1],
+      sign: signMatch[1],
+      timestamp: timestampMatch[1],
+      jsToken: extractJsToken(html),
+      fileList: JSON.parse(fileListMatch[1]),
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function hydrateDlink(file: any, source: any, cookie: string, rawUrl: string, jsToken = '') {
   const shareid = file.shareid || source.shareid || source.share_id || source.shareId;
   const uk = file.uk || source.uk;
