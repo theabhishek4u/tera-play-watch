@@ -1,5 +1,5 @@
 import { useState, useRef } from "react";
-import { Play, Download, Link, Loader2, AlertCircle, FileVideo, Pause, Volume2, VolumeX, Maximize } from "lucide-react";
+import { Play, Download, Link, Loader2, AlertCircle, FileVideo, RefreshCw } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 
 interface TeraBoxFile {
@@ -18,11 +18,18 @@ interface VideoData {
   surl?: string;
 }
 
+// All known TeraBox domains
+const VALID_DOMAINS = [
+  "terabox", "1024tera", "freeterabox", "teraboxlink", "teraboxshare",
+  "4funbox", "mirrobox", "nephobox", "momerybox", "tibibox",
+];
+
 const PlayerSection = () => {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [videoData, setVideoData] = useState<VideoData | null>(null);
   const [error, setError] = useState("");
+  const [errorCode, setErrorCode] = useState("");
   const [activeVideo, setActiveVideo] = useState<TeraBoxFile | null>(null);
   const [playing, setPlaying] = useState(false);
   const [videoError, setVideoError] = useState("");
@@ -31,14 +38,15 @@ const PlayerSection = () => {
   const handleFetch = async () => {
     if (!url.trim()) return;
 
-    const validDomains = ["terabox", "1024tera", "freeterabox", "teraboxlink", "teraboxshare"];
-    if (!validDomains.some(d => url.includes(d))) {
-      setError("Please enter a valid TeraBox URL.");
+    if (!VALID_DOMAINS.some(d => url.includes(d))) {
+      setError("Please enter a valid TeraBox URL. Supported domains: terabox.com, 1024tera.com, freeterabox.com, etc.");
+      setErrorCode("");
       return;
     }
 
     setLoading(true);
     setError("");
+    setErrorCode("");
     setVideoData(null);
     setActiveVideo(null);
     setPlaying(false);
@@ -50,12 +58,14 @@ const PlayerSection = () => {
       });
 
       if (fnError) {
-        setError("TeraBox link fetch failed. Please refresh the TeraBox session cookie in backend secrets and try again.");
+        setError("TeraBox link fetch failed. The server may be temporarily unavailable. Please try again in a moment.");
+        setErrorCode("NETWORK_ERROR");
         return;
       }
 
       if (!data?.success) {
         setError(data?.error || "Could not fetch video from TeraBox. Please try another public TeraBox link.");
+        setErrorCode(data?.code || "");
         return;
       }
 
@@ -66,7 +76,8 @@ const PlayerSection = () => {
         setPlaying(Boolean(firstPlayableVideo?.dlink));
       }
     } catch (err: any) {
-      setError(err.message || "Something went wrong");
+      setError(err.message || "Something went wrong. Please try again.");
+      setErrorCode("UNKNOWN_ERROR");
     } finally {
       setLoading(false);
     }
@@ -93,6 +104,10 @@ const PlayerSection = () => {
       a.target = "_blank";
       a.click();
     }
+  };
+
+  const handleRetry = () => {
+    handleFetch();
   };
 
   const toggleFullscreen = () => {
@@ -142,9 +157,26 @@ const PlayerSection = () => {
           </div>
 
           {error && (
-            <div className="mt-4 flex items-center gap-2 rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-              <AlertCircle className="h-4 w-4 shrink-0" />
-              {error}
+            <div className="mt-4 rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+              <div className="flex items-start gap-2">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                <div className="flex-1">
+                  <p>{error}</p>
+                  {errorCode === "TERABOX_LINK_FETCH_FAILED" && (
+                    <p className="mt-2 text-xs text-destructive/80">
+                      💡 Tip: Make sure the link is a public share link (not private). If the issue persists, the TeraBox session may need to be refreshed on the server.
+                    </p>
+                  )}
+                </div>
+              </div>
+              <button
+                onClick={handleRetry}
+                disabled={loading}
+                className="mt-3 flex items-center gap-1.5 rounded-lg bg-destructive/20 px-3 py-1.5 text-xs font-medium text-destructive transition-all hover:bg-destructive/30 disabled:opacity-50"
+              >
+                <RefreshCw className={`h-3 w-3 ${loading ? "animate-spin" : ""}`} />
+                Retry
+              </button>
             </div>
           )}
         </div>
@@ -163,20 +195,29 @@ const PlayerSection = () => {
                       className="h-full w-full"
                       controls
                       autoPlay
-                      onError={() => setVideoError("Video playback failed because TeraBox rejected the stream. Refresh the backend TeraBox session cookie or try another public video link.")}
+                      onError={() => setVideoError("Video playback failed. The stream may have been rejected by TeraBox. Try clicking 'Download Instead' or re-fetch the video.")}
                     />
                     {videoError && (
                       <div className="absolute inset-0 flex items-center justify-center bg-black/80">
                         <div className="text-center px-6">
                           <AlertCircle className="mx-auto h-10 w-10 text-destructive mb-3" />
                           <p className="text-sm text-muted-foreground">{videoError}</p>
-                          <button
-                            onClick={() => handleDownload(activeVideo)}
-                            className="mt-4 flex mx-auto items-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground"
-                          >
-                            <Download className="h-4 w-4" />
-                            Download Instead
-                          </button>
+                          <div className="mt-4 flex justify-center gap-3">
+                            <button
+                              onClick={() => handleDownload(activeVideo)}
+                              className="flex items-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground"
+                            >
+                              <Download className="h-4 w-4" />
+                              Download Instead
+                            </button>
+                            <button
+                              onClick={() => { setVideoError(""); setPlaying(false); setTimeout(() => setPlaying(true), 100); }}
+                              className="flex items-center gap-2 rounded-xl border border-border px-5 py-2.5 text-sm font-semibold text-foreground hover:bg-muted/50"
+                            >
+                              <RefreshCw className="h-4 w-4" />
+                              Retry Play
+                            </button>
+                          </div>
                         </div>
                       </div>
                     )}

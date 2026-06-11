@@ -5,10 +5,79 @@ const corsHeaders = {
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
+// All known TeraBox domains for URL validation and API calls
+const TERABOX_DOMAINS = [
+  'terabox.com', 'terabox.app', 'dm.terabox.app',
+  '1024tera.com', '1024terabox.com',
+  'freeterabox.com', 'teraboxlink.com', 'teraboxshare.com',
+  '4funbox.com', 'mirrobox.com', 'nephobox.com',
+  'momerybox.com', 'tibibox.com',
+];
+
+// TeraBox API hosts to try (in priority order)
+const API_HOSTS = [
+  'https://www.terabox.app',
+  'https://dm.terabox.app',
+  'https://www.terabox.com',
+  'https://www.1024tera.com',
+];
+
+// Updated third-party fallback APIs (replaces dead ones)
 const APIS = [
-  { name: 'ashlynn', url: (teraUrl: string) => `https://ashlynn.serv00.net/Ashlynnterabox.php/?url=${encodeURIComponent(teraUrl)}` },
-  { name: 'darkhacker', url: (teraUrl: string) => `https://teraboxapi2.darkhacker7301.workers.dev/?url=${encodeURIComponent(teraUrl)}` },
-  { name: 'tera-core', url: (teraUrl: string) => `https://tera-core.vercel.app/api2?url=${encodeURIComponent(teraUrl)}` },
+  {
+    name: 'teraboxvideodownloader',
+    fetch: async (teraUrl: string) => {
+      const res = await fetch('https://teraboxvideodownloader.com/api/get-download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'User-Agent': UA },
+        body: JSON.stringify({ url: teraUrl }),
+        signal: AbortSignal.timeout(15000),
+      });
+      return res;
+    },
+  },
+  {
+    name: 'ytshorts-savetube',
+    fetch: async (teraUrl: string) => {
+      const res = await fetch('https://ytshorts.savetube.me/api/v1/terabox-downloader', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'User-Agent': UA },
+        body: JSON.stringify({ url: teraUrl }),
+        signal: AbortSignal.timeout(15000),
+      });
+      return res;
+    },
+  },
+  {
+    name: 'teraboxapp-dl1',
+    fetch: async (teraUrl: string) => {
+      const res = await fetch(`https://teraboxapp.com/api/get-info?data=${encodeURIComponent(teraUrl)}`, {
+        headers: { 'User-Agent': UA },
+        signal: AbortSignal.timeout(15000),
+      });
+      return res;
+    },
+  },
+  {
+    name: 'terabox-dl-api',
+    fetch: async (teraUrl: string) => {
+      const res = await fetch(`https://api.terabox-dl.com/dl?url=${encodeURIComponent(teraUrl)}`, {
+        headers: { 'User-Agent': UA },
+        signal: AbortSignal.timeout(15000),
+      });
+      return res;
+    },
+  },
+  {
+    name: 'teradl-worker',
+    fetch: async (teraUrl: string) => {
+      const res = await fetch(`https://teradl-api.darkhacker7301.workers.dev/?url=${encodeURIComponent(teraUrl)}`, {
+        headers: { 'User-Agent': UA },
+        signal: AbortSignal.timeout(15000),
+      });
+      return res;
+    },
+  },
 ];
 
 Deno.serve(async (req) => {
@@ -23,16 +92,25 @@ Deno.serve(async (req) => {
       return jsonRes({ success: false, error: 'URL is required' }, 400);
     }
 
+    // Validate URL contains a known TeraBox domain
+    const isValid = TERABOX_DOMAINS.some(d => url.includes(d));
+    if (!isValid) {
+      return jsonRes({ success: false, error: 'Please enter a valid TeraBox URL.' }, 400);
+    }
+
     const surl = await extractSurl(url.trim());
     if (!surl) {
-      return jsonRes({ success: false, error: 'Could not extract share code from URL' }, 400);
+      return jsonRes({ success: false, error: 'Could not extract share code from URL. Make sure the link is a valid public share link.' }, 400);
     }
 
     console.log('Fetching for surl:', surl);
 
-    // PRIMARY: use ndus cookie with official TeraBox API
+    // ─── PRIMARY: use ndus cookie with official TeraBox API ───
     const ndus = Deno.env.get('TERABOX_NDUS');
     if (ndus) {
+      console.log('TERABOX_NDUS cookie found, trying cookie-based methods...');
+
+      // Method 1: share/list API
       try {
         const direct = await fetchWithShareList(url.trim(), surl, ndus);
         if (direct) {
@@ -42,6 +120,8 @@ Deno.serve(async (req) => {
       } catch (e) {
         console.log('share-list failed:', e instanceof Error ? e.message : e);
       }
+
+      // Method 2: share page HTML scraping (with cookie)
       try {
         const direct = await fetchFromSharePage(url.trim(), surl, ndus);
         if (direct) {
@@ -51,6 +131,8 @@ Deno.serve(async (req) => {
       } catch (e) {
         console.log('share-page failed:', e instanceof Error ? e.message : e);
       }
+
+      // Method 3: shorturlinfo + share/download (with cookie)
       try {
         const direct = await fetchWithCookie(surl, ndus);
         if (direct) {
@@ -61,18 +143,26 @@ Deno.serve(async (req) => {
         console.log('cookie path failed:', e instanceof Error ? e.message : e);
       }
     } else {
-      console.log('No TERABOX_NDUS cookie set — falling back to public APIs');
+      console.log('No TERABOX_NDUS cookie set — trying public scrape then fallback APIs');
     }
 
-    // FALLBACK: third-party APIs
+    // ─── SECONDARY: public page scrape (no cookie) ───
+    try {
+      console.log('Trying public page scrape (no cookie)...');
+      const scraped = await fetchFromSharePagePublic(url.trim(), surl);
+      if (scraped) {
+        console.log(`public scrape success! Files: ${scraped.files.length}`);
+        return jsonRes({ success: true, data: scraped });
+      }
+    } catch (e) {
+      console.log('public scrape failed:', e instanceof Error ? e.message : e);
+    }
+
+    // ─── TERTIARY: third-party fallback APIs ───
     for (const api of APIS) {
       try {
         console.log(`Trying ${api.name}...`);
-        const apiUrl = api.url(url.trim());
-        const res = await fetch(apiUrl, {
-          headers: { 'User-Agent': UA },
-          signal: AbortSignal.timeout(15000),
-        });
+        const res = await api.fetch(url.trim());
 
         if (!res.ok) {
           console.log(`${api.name} returned ${res.status}`);
@@ -93,10 +183,14 @@ Deno.serve(async (req) => {
       }
     }
 
+    // ─── ALL METHODS FAILED ───
+    const hasCookie = !!ndus;
     return jsonRes({
       success: false,
       fallback: true,
-      error: 'TeraBox could not generate a playable link right now. The saved TeraBox login session may be expired, or this share link may be private/deleted/password-protected.',
+      error: hasCookie
+        ? 'Could not fetch video. Your TeraBox session cookie (NDUS) may have expired. Please refresh the cookie in Supabase secrets and try again. The link may also be private/deleted/password-protected.'
+        : 'Could not fetch video. No TeraBox session cookie (NDUS) is configured. Set the TERABOX_NDUS secret in Supabase for reliable operation. The link may also be private/deleted/password-protected.',
       code: 'TERABOX_LINK_FETCH_FAILED',
     });
 
@@ -111,10 +205,14 @@ Deno.serve(async (req) => {
   }
 });
 
+// ═══════════════════════════════════════════════════
+// URL / surl extraction
+// ═══════════════════════════════════════════════════
+
 async function extractSurl(rawUrl: string): Promise<string> {
   try {
     let u = new URL(rawUrl);
-    // Follow shortener redirects (1024terabox, freeterabox short links)
+    // Try to get surl directly from URL params or path
     if (/\/s\/[A-Za-z0-9_-]+/.test(u.pathname) || u.searchParams.get('surl')) {
       let s = u.searchParams.get('surl') || '';
       if (!s) {
@@ -123,8 +221,17 @@ async function extractSurl(rawUrl: string): Promise<string> {
       }
       if (s) return s;
     }
+    // Handle /wap/share/filelist?surl= format
+    if (u.pathname.includes('/wap/share/filelist') || u.pathname.includes('/sharing/link')) {
+      const s = u.searchParams.get('surl');
+      if (s) return s.startsWith('1') ? s.slice(1) : s;
+    }
     // Follow redirect to resolve final URL
-    const r = await fetch(rawUrl, { redirect: 'follow', headers: { 'User-Agent': UA } });
+    const r = await fetch(rawUrl, {
+      redirect: 'follow',
+      headers: { 'User-Agent': UA },
+      signal: AbortSignal.timeout(10000),
+    });
     const finalUrl = new URL(r.url);
     let s = finalUrl.searchParams.get('surl') || '';
     if (!s) {
@@ -137,9 +244,34 @@ async function extractSurl(rawUrl: string): Promise<string> {
   }
 }
 
-async function fetchWithCookie(surl: string, ndus: string): Promise<{ title: string; files: any[]; surl: string } | null> {
-  return _fetchWithCookieImpl(surl, ndus);
+// ═══════════════════════════════════════════════════
+// Cookie helpers
+// ═══════════════════════════════════════════════════
+
+function makeTeraCookie(ndus: string): string {
+  let ndusVal = ndus.trim().replace(/^['"]|['"]$/g, '');
+  if (ndusVal.toLowerCase().startsWith('ndus=')) ndusVal = ndusVal.slice(5);
+  ndusVal = ndusVal.split(';')[0].trim();
+  return ndusVal ? `lang=en; ndus=${ndusVal};` : 'lang=en;';
 }
+
+function extractJsToken(html: string): string {
+  const patterns = [
+    /fn%28%22([^%"]+)%22%29/,
+    /fn\("([^"]+)"\)/,
+    /jsToken["']?\s*[:=]\s*["']([^"']+)["']/,
+    /MYJSTOKEN["']?\s*[:=]\s*["']([^"']+)["']/,
+  ];
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match?.[1]) return decodeURIComponent(match[1]);
+  }
+  return '';
+}
+
+// ═══════════════════════════════════════════════════
+// Method 1: share/list API (with cookie)
+// ═══════════════════════════════════════════════════
 
 async function fetchWithShareList(rawUrl: string, surl: string, ndus: string): Promise<{ title: string; files: any[]; surl: string } | null> {
   const cookie = makeTeraCookie(ndus);
@@ -154,6 +286,7 @@ async function fetchWithShareList(rawUrl: string, surl: string, ndus: string): P
       'Referer': 'https://www.terabox.app/',
     },
     redirect: 'follow',
+    signal: AbortSignal.timeout(15000),
   });
 
   if (!pageRes.ok) throw new Error(`share landing ${pageRes.status}`);
@@ -183,6 +316,7 @@ async function fetchWithShareList(rawUrl: string, surl: string, ndus: string): P
       'Referer': `${pageUrl}&clearCache=1`,
       'Origin': 'https://dm.terabox.app',
     },
+    signal: AbortSignal.timeout(15000),
   });
   if (!listRes.ok) throw new Error(`share/list ${listRes.status}`);
   const listData = await listRes.json();
@@ -190,11 +324,11 @@ async function fetchWithShareList(rawUrl: string, surl: string, ndus: string): P
 
   if (listData?.errno !== 0 || !listData?.list?.length) return null;
   const files = await collectShareFiles(shorturl, listData, cookie, pageUrl, jsToken, listData.list);
-  console.log('share/list flattened files:', files.length, 'videos:', files.filter(f => f.isVideo).length);
-  for (const file of files.filter(f => !f.isDir && !f.dlink)) {
+  console.log('share/list flattened files:', files.length, 'videos:', files.filter((f: any) => f.isVideo).length);
+  for (const file of files.filter((f: any) => !f.isDir && !f.dlink)) {
     await hydrateDlink(file, listData, cookie, rawUrl, jsToken);
   }
-  if (!files.some(f => f.dlink)) return null;
+  if (!files.some((f: any) => f.dlink)) return null;
 
   return { title: listData.title || files[0]?.name || 'TeraBox File', files, surl: shorturl };
 }
@@ -229,6 +363,7 @@ async function collectShareFiles(shorturl: string, source: any, cookie: string, 
           'Referer': `${pageUrl}&clearCache=1`,
           'Origin': 'https://dm.terabox.app',
         },
+        signal: AbortSignal.timeout(15000),
       });
       if (!childRes.ok) continue;
       const childData = await childRes.json();
@@ -243,26 +378,290 @@ async function collectShareFiles(shorturl: string, source: any, cookie: string, 
   return flattened;
 }
 
-function makeTeraCookie(ndus: string): string {
-  let ndusVal = ndus.trim().replace(/^['"]|['"]$/g, '');
-  if (ndusVal.toLowerCase().startsWith('ndus=')) ndusVal = ndusVal.slice(5);
-  ndusVal = ndusVal.split(';')[0].trim();
-  return ndusVal ? `lang=en; ndus=${ndusVal};` : 'lang=en;';
+// ═══════════════════════════════════════════════════
+// Method 2: Share page HTML scraping (with cookie)
+// ═══════════════════════════════════════════════════
+
+async function fetchFromSharePage(rawUrl: string, surl: string, ndus: string): Promise<{ title: string; files: any[]; surl: string } | null> {
+  const cookie = makeTeraCookie(ndus);
+
+  const headers = {
+    'User-Agent': UA,
+    'Cookie': cookie,
+    'Accept': 'text/html,application/xhtml+xml',
+    'Accept-Language': 'en-US,en;q=0.9',
+  };
+
+  const res = await fetch(rawUrl, { headers, redirect: 'follow', signal: AbortSignal.timeout(15000) });
+  if (!res.ok) throw new Error(`share page ${res.status}`);
+  const html = await res.text();
+
+  // Extract yunData (TeraBox embeds page state as JS object)
+  const yunMatch = html.match(/yunData\s*=\s*(\{[\s\S]*?\});?\s*(?:<\/script>|var\s|window\.)/);
+  if (!yunMatch) {
+    console.log('yunData not found in HTML (len=', html.length, '), trying file_list parser');
+    const parsed = parseShareParamsFromHtml(html);
+    if (!parsed) throw new Error('share parameters not found — link may need login or page changed');
+    const files = buildFilesFromList(parsed.fileList, surl, parsed);
+    for (const file of files.filter((f: any) => !f.isDir && !f.dlink)) {
+      await hydrateDlink(file, parsed, cookie, rawUrl, parsed.jsToken || '');
+    }
+    if (!files.some((f: any) => f.dlink)) return null;
+    return { title: files[0]?.name || 'TeraBox File', files, surl };
+  }
+  let yunData: any;
+  try {
+    yunData = JSON.parse(yunMatch[1]);
+  } catch (e) {
+    throw new Error('yunData parse failed');
+  }
+
+  const shareid = yunData.SHARE_ID || yunData.shareid;
+  const uk = yunData.SHARE_UK || yunData.share_uk || yunData.uk;
+  const sign = yunData.SIGN || yunData.sign;
+  const timestamp = yunData.TIMESTAMP || yunData.timestamp;
+  const jsToken = yunData.MYJSTOKEN || yunData.jsToken;
+  const fileList: any[] = yunData.FILEINFO || yunData.file_list || [];
+
+  console.log('yunData parsed: shareid=', !!shareid, 'uk=', !!uk, 'sign=', !!sign, 'files=', fileList.length);
+
+  if (!fileList.length || !shareid || !uk || !sign) {
+    throw new Error('yunData missing required fields');
+  }
+
+  const baseHeaders = {
+    'User-Agent': UA,
+    'Cookie': cookie,
+    'Referer': rawUrl,
+    'Accept': 'application/json, text/plain, */*',
+  };
+
+  const files: any[] = [];
+  for (const item of fileList) {
+    let dlink = item.dlink || '';
+    if (!dlink) {
+      try {
+        const dlUrl = `https://www.terabox.com/share/download?app_id=250528&channel=dubox&clienttype=0&web=1&sign=${encodeURIComponent(sign)}&timestamp=${timestamp}${jsToken ? `&jsToken=${encodeURIComponent(jsToken)}` : ''}`;
+        const body = `encrypt=0&product=share&uk=${uk}&primaryid=${shareid}&fid_list=%5B${item.fs_id}%5D`;
+        const dlRes = await fetch(dlUrl, {
+          method: 'POST',
+          headers: { ...baseHeaders, 'Content-Type': 'application/x-www-form-urlencoded' },
+          body,
+          signal: AbortSignal.timeout(15000),
+        });
+        const dlData = await dlRes.json();
+        dlink = dlData?.list?.[0]?.dlink || '';
+        console.log('share/download errno:', dlData?.errno, 'has dlink:', !!dlink);
+      } catch (e) {
+        console.log('share/download error', e instanceof Error ? e.message : e);
+      }
+    }
+
+    files.push({
+      name: item.server_filename || item.filename || 'Unknown',
+      size: formatSize(Number(item.size) || 0),
+      sizeBytes: Number(item.size) || 0,
+      thumbnail: item.thumbs?.url3 || item.thumbs?.url2 || item.thumbs?.url1 || '',
+      isVideo: isVideoFile(item.server_filename || item.filename || ''),
+      dlink,
+      fsId: String(item.fs_id),
+    });
+  }
+
+  if (!files.some(f => f.dlink)) return null;
+  return { title: files[0]?.name || 'TeraBox File', files, surl };
 }
 
-function extractJsToken(html: string): string {
-  const patterns = [
-    /fn%28%22([^%"]+)%22%29/,
-    /fn\("([^"]+)"\)/,
-    /jsToken["']?\s*[:=]\s*["']([^"']+)["']/,
-    /MYJSTOKEN["']?\s*[:=]\s*["']([^"']+)["']/,
+// ═══════════════════════════════════════════════════
+// Method 2b: Public page scrape (NO cookie)
+// ═══════════════════════════════════════════════════
+
+async function fetchFromSharePagePublic(rawUrl: string, surl: string): Promise<{ title: string; files: any[]; surl: string } | null> {
+  // Try multiple TeraBox hosts for the share page
+  const urls = [
+    rawUrl,
+    `https://www.terabox.app/s/1${surl}`,
+    `https://dm.terabox.app/sharing/link?surl=${surl}`,
+    `https://www.1024tera.com/s/1${surl}`,
+    `https://www.terabox.com/s/1${surl}`,
   ];
-  for (const pattern of patterns) {
-    const match = html.match(pattern);
-    if (match?.[1]) return decodeURIComponent(match[1]);
+
+  for (const tryUrl of urls) {
+    try {
+      console.log('Public scrape trying:', tryUrl.substring(0, 60));
+      const res = await fetch(tryUrl, {
+        headers: {
+          'User-Agent': UA,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Cookie': 'lang=en;',
+        },
+        redirect: 'follow',
+        signal: AbortSignal.timeout(12000),
+      });
+      if (!res.ok) {
+        console.log('Public scrape', tryUrl.substring(0, 40), 'returned', res.status);
+        continue;
+      }
+
+      const html = await res.text();
+      console.log('Public scrape HTML len:', html.length);
+
+      // Try yunData extraction
+      const yunMatch = html.match(/yunData\s*=\s*(\{[\s\S]*?\});?\s*(?:<\/script>|var\s|window\.)/);
+      if (yunMatch) {
+        try {
+          const yunData = JSON.parse(yunMatch[1]);
+          const fileList: any[] = yunData.FILEINFO || yunData.file_list || [];
+          if (fileList.length > 0) {
+            const files = fileList.map((item: any) => ({
+              name: item.server_filename || item.filename || 'Unknown',
+              size: formatSize(Number(item.size) || 0),
+              sizeBytes: Number(item.size) || 0,
+              thumbnail: item.thumbs?.url3 || item.thumbs?.url2 || item.thumbs?.url1 || '',
+              isVideo: isVideoFile(item.server_filename || item.filename || ''),
+              dlink: item.dlink || '',
+              fsId: String(item.fs_id || Math.random()),
+            }));
+            if (files.some((f: any) => f.dlink)) {
+              return { title: files[0]?.name || 'TeraBox File', files, surl };
+            }
+          }
+        } catch {
+          console.log('yunData parse failed for public scrape');
+        }
+      }
+
+      // Try file_list parser fallback
+      const parsed = parseShareParamsFromHtml(html);
+      if (parsed && parsed.fileList?.length > 0) {
+        const files = buildFilesFromList(parsed.fileList, surl, parsed);
+        if (files.some((f: any) => f.dlink)) {
+          return { title: files[0]?.name || 'TeraBox File', files, surl };
+        }
+      }
+
+      // Try to extract direct video link from embedded player
+      const videoMatch = html.match(/videoUrl\s*[:=]\s*["']([^"']+)["']/) ||
+                         html.match(/stream_url\s*[:=]\s*["']([^"']+)["']/) ||
+                         html.match(/"dlink"\s*:\s*"([^"]+)"/) ||
+                         html.match(/play_url\s*[:=]\s*["']([^"']+)["']/);
+      const titleMatch = html.match(/<title>([^<]+)<\/title>/) ||
+                         html.match(/server_filename\s*[:=]\s*["']([^"']+)["']/);
+
+      if (videoMatch?.[1]) {
+        const dlink = videoMatch[1].replace(/\\\//g, '/');
+        const name = titleMatch?.[1]?.replace(/ - TeraBox.*$/i, '').trim() || 'TeraBox Video';
+        return {
+          title: name,
+          files: [{
+            name,
+            size: '0',
+            sizeBytes: 0,
+            thumbnail: '',
+            isVideo: true,
+            dlink,
+            fsId: String(Math.random()),
+          }],
+          surl,
+        };
+      }
+    } catch (e) {
+      console.log('Public scrape error for', tryUrl.substring(0, 40), ':', e instanceof Error ? e.message : e);
+    }
   }
-  return '';
+
+  return null;
 }
+
+// ═══════════════════════════════════════════════════
+// Method 3: shorturlinfo + share/download (with cookie)
+// ═══════════════════════════════════════════════════
+
+async function fetchWithCookie(surl: string, ndus: string): Promise<{ title: string; files: any[]; surl: string } | null> {
+  return _fetchWithCookieImpl(surl, ndus);
+}
+
+async function _fetchWithCookieImpl(surl: string, ndus: string): Promise<{ title: string; files: any[]; surl: string } | null> {
+  const cookie = makeTeraCookie(ndus);
+  const baseHeaders = {
+    'User-Agent': UA,
+    'Cookie': cookie,
+    'Referer': 'https://www.terabox.com/',
+    'Accept': 'application/json, text/plain, */*',
+  };
+
+  // 1) shorturlinfo — try multiple host + shorturl format combos
+  const shorturlVariants = [surl.startsWith('1') ? surl : `1${surl}`, surl];
+  let info: any = null;
+  for (const host of API_HOSTS) {
+    for (const sv of shorturlVariants) {
+      try {
+        const infoUrl = `${host}/api/shorturlinfo?app_id=250528&web=1&channel=dubox&clienttype=0&shorturl=${encodeURIComponent(sv)}&root=1`;
+        const r = await fetch(infoUrl, {
+          headers: { ...baseHeaders, Referer: host + '/' },
+          signal: AbortSignal.timeout(12000),
+        });
+        if (!r.ok) { console.log(`shorturlinfo ${host} ${sv} http ${r.status}`); continue; }
+        const d = await r.json();
+        console.log(`shorturlinfo ${host} sv=${sv} errno=${d?.errno} files=${d?.list?.length || 0}`);
+        if (d?.errno === 0 && d?.list?.length) { info = d; break; }
+      } catch (e) {
+        console.log('shorturlinfo error', e instanceof Error ? e.message : e);
+      }
+    }
+    if (info) break;
+  }
+  if (!info) throw new Error('shorturlinfo: all variants rejected (check ndus cookie validity)');
+
+  const shareid = info.shareid;
+  const uk = info.uk;
+  const sign = info.sign;
+  const timestamp = info.timestamp;
+
+  const files: any[] = [];
+  for (const item of info.list) {
+    let dlink = '';
+    try {
+      // 2) get real download link
+      const dlUrl = `https://www.terabox.com/share/download?app_id=250528&channel=dubox&clienttype=0&web=1&sign=${encodeURIComponent(sign)}&timestamp=${timestamp}`;
+      const body = `encrypt=0&product=share&uk=${uk}&primaryid=${shareid}&fid_list=%5B${item.fs_id}%5D`;
+      const dlRes = await fetch(dlUrl, {
+        method: 'POST',
+        headers: { ...baseHeaders, 'Content-Type': 'application/x-www-form-urlencoded' },
+        body,
+        signal: AbortSignal.timeout(15000),
+      });
+      const dlData = await dlRes.json();
+      dlink = dlData?.list?.[0]?.dlink || '';
+      console.log('share/download errno:', dlData?.errno, 'has dlink:', !!dlink);
+    } catch (e) {
+      console.log('share/download error', e instanceof Error ? e.message : e);
+    }
+
+    files.push({
+      name: item.server_filename || 'Unknown',
+      size: formatSize(Number(item.size) || 0),
+      sizeBytes: Number(item.size) || 0,
+      thumbnail: item.thumbs?.url3 || item.thumbs?.url2 || item.thumbs?.url1 || '',
+      isVideo: isVideoFile(item.server_filename || ''),
+      dlink,
+      fsId: String(item.fs_id),
+    });
+  }
+
+  if (!files.some(f => f.dlink)) return null;
+
+  return {
+    title: info.title || files[0]?.name || 'TeraBox File',
+    files,
+    surl,
+  };
+}
+
+// ═══════════════════════════════════════════════════
+// Shared helpers
+// ═══════════════════════════════════════════════════
 
 function buildFilesFromList(list: any[], surl: string, source: any): any[] {
   return list.map((item: any) => ({
@@ -335,6 +734,7 @@ async function hydrateDlink(file: any, source: any, cookie: string, rawUrl: stri
       'Referer': rawUrl,
       'Origin': 'https://www.terabox.app',
     },
+    signal: AbortSignal.timeout(12000),
   });
   if (!apiRes.ok) return;
   const apiData = await apiRes.json();
@@ -342,171 +742,12 @@ async function hydrateDlink(file: any, source: any, cookie: string, rawUrl: stri
   console.log('share/list download errno:', apiData?.errno, 'has dlink:', !!file.dlink);
 }
 
-async function fetchFromSharePage(rawUrl: string, surl: string, ndus: string): Promise<{ title: string; files: any[]; surl: string } | null> {
-  const cookie = makeTeraCookie(ndus);
-
-  const headers = {
-    'User-Agent': UA,
-    'Cookie': cookie,
-    'Accept': 'text/html,application/xhtml+xml',
-    'Accept-Language': 'en-US,en;q=0.9',
-  };
-
-  const res = await fetch(rawUrl, { headers, redirect: 'follow' });
-  if (!res.ok) throw new Error(`share page ${res.status}`);
-  const html = await res.text();
-
-  // Extract yunData (TeraBox embeds page state as JS object)
-  const yunMatch = html.match(/yunData\s*=\s*(\{[\s\S]*?\});?\s*(?:<\/script>|var\s|window\.)/);
-  if (!yunMatch) {
-    console.log('yunData not found in HTML (len=', html.length, '), trying file_list parser');
-    const parsed = parseShareParamsFromHtml(html);
-    if (!parsed) throw new Error('share parameters not found — link may need login or page changed');
-    const files = buildFilesFromList(parsed.fileList, surl, parsed);
-    for (const file of files.filter(f => !f.isDir && !f.dlink)) {
-      await hydrateDlink(file, parsed, cookie, rawUrl, parsed.jsToken || '');
-    }
-    if (!files.some(f => f.dlink)) return null;
-    return { title: files[0]?.name || 'TeraBox File', files, surl };
-  }
-  let yunData: any;
-  try {
-    yunData = JSON.parse(yunMatch[1]);
-  } catch (e) {
-    throw new Error('yunData parse failed');
-  }
-
-  const shareid = yunData.SHARE_ID || yunData.shareid;
-  const uk = yunData.SHARE_UK || yunData.share_uk || yunData.uk;
-  const sign = yunData.SIGN || yunData.sign;
-  const timestamp = yunData.TIMESTAMP || yunData.timestamp;
-  const jsToken = yunData.MYJSTOKEN || yunData.jsToken;
-  const fileList: any[] = yunData.FILEINFO || yunData.file_list || [];
-
-  console.log('yunData parsed: shareid=', !!shareid, 'uk=', !!uk, 'sign=', !!sign, 'files=', fileList.length);
-
-  if (!fileList.length || !shareid || !uk || !sign) {
-    throw new Error('yunData missing required fields');
-  }
-
-  const baseHeaders = {
-    'User-Agent': UA,
-    'Cookie': cookie,
-    'Referer': rawUrl,
-    'Accept': 'application/json, text/plain, */*',
-  };
-
-  const files: any[] = [];
-  for (const item of fileList) {
-    let dlink = item.dlink || '';
-    if (!dlink) {
-      try {
-        const dlUrl = `https://www.terabox.com/share/download?app_id=250528&channel=dubox&clienttype=0&web=1&sign=${encodeURIComponent(sign)}&timestamp=${timestamp}${jsToken ? `&jsToken=${encodeURIComponent(jsToken)}` : ''}`;
-        const body = `encrypt=0&product=share&uk=${uk}&primaryid=${shareid}&fid_list=%5B${item.fs_id}%5D`;
-        const dlRes = await fetch(dlUrl, {
-          method: 'POST',
-          headers: { ...baseHeaders, 'Content-Type': 'application/x-www-form-urlencoded' },
-          body,
-        });
-        const dlData = await dlRes.json();
-        dlink = dlData?.list?.[0]?.dlink || '';
-        console.log('share/download errno:', dlData?.errno, 'has dlink:', !!dlink);
-      } catch (e) {
-        console.log('share/download error', e instanceof Error ? e.message : e);
-      }
-    }
-
-    files.push({
-      name: item.server_filename || item.filename || 'Unknown',
-      size: formatSize(Number(item.size) || 0),
-      sizeBytes: Number(item.size) || 0,
-      thumbnail: item.thumbs?.url3 || item.thumbs?.url2 || item.thumbs?.url1 || '',
-      isVideo: isVideoFile(item.server_filename || item.filename || ''),
-      dlink,
-      fsId: String(item.fs_id),
-    });
-  }
-
-  if (!files.some(f => f.dlink)) return null;
-  return { title: files[0]?.name || 'TeraBox File', files, surl };
-}
-
-async function _fetchWithCookieImpl(surl: string, ndus: string): Promise<{ title: string; files: any[]; surl: string } | null> {
-  const cookie = makeTeraCookie(ndus);
-  const baseHeaders = {
-    'User-Agent': UA,
-    'Cookie': cookie,
-    'Referer': 'https://www.terabox.com/',
-    'Accept': 'application/json, text/plain, */*',
-  };
-
-  // 1) shorturlinfo — try multiple host + shorturl format combos
-  const hosts = ['https://www.terabox.com', 'https://www.terabox.app', 'https://dm.terabox.app', 'https://www.1024tera.com'];
-  const shorturlVariants = [surl.startsWith('1') ? surl : `1${surl}`, surl];
-  let info: any = null;
-  for (const host of hosts) {
-    for (const sv of shorturlVariants) {
-      try {
-        const infoUrl = `${host}/api/shorturlinfo?app_id=250528&web=1&channel=dubox&clienttype=0&shorturl=${encodeURIComponent(sv)}&root=1`;
-        const r = await fetch(infoUrl, { headers: { ...baseHeaders, Referer: host + '/' } });
-        if (!r.ok) { console.log(`shorturlinfo ${host} ${sv} http ${r.status}`); continue; }
-        const d = await r.json();
-        console.log(`shorturlinfo ${host} sv=${sv} errno=${d?.errno} files=${d?.list?.length || 0}`);
-        if (d?.errno === 0 && d?.list?.length) { info = d; break; }
-      } catch (e) {
-        console.log('shorturlinfo error', e instanceof Error ? e.message : e);
-      }
-    }
-    if (info) break;
-  }
-  if (!info) throw new Error('shorturlinfo: all variants rejected (check ndus cookie validity)');
-
-  const shareid = info.shareid;
-  const uk = info.uk;
-  const sign = info.sign;
-  const timestamp = info.timestamp;
-
-  const files: any[] = [];
-  for (const item of info.list) {
-    let dlink = '';
-    try {
-      // 2) get real download link
-      const dlUrl = `https://www.terabox.com/share/download?app_id=250528&channel=dubox&clienttype=0&web=1&sign=${encodeURIComponent(sign)}&timestamp=${timestamp}`;
-      const body = `encrypt=0&product=share&uk=${uk}&primaryid=${shareid}&fid_list=%5B${item.fs_id}%5D`;
-      const dlRes = await fetch(dlUrl, {
-        method: 'POST',
-        headers: { ...baseHeaders, 'Content-Type': 'application/x-www-form-urlencoded' },
-        body,
-      });
-      const dlData = await dlRes.json();
-      dlink = dlData?.list?.[0]?.dlink || '';
-      console.log('share/download errno:', dlData?.errno, 'has dlink:', !!dlink);
-    } catch (e) {
-      console.log('share/download error', e instanceof Error ? e.message : e);
-    }
-
-    files.push({
-      name: item.server_filename || 'Unknown',
-      size: formatSize(Number(item.size) || 0),
-      sizeBytes: Number(item.size) || 0,
-      thumbnail: item.thumbs?.url3 || item.thumbs?.url2 || item.thumbs?.url1 || '',
-      isVideo: isVideoFile(item.server_filename || ''),
-      dlink,
-      fsId: String(item.fs_id),
-    });
-  }
-
-  if (!files.some(f => f.dlink)) return null;
-
-  return {
-    title: info.title || files[0]?.name || 'TeraBox File',
-    files,
-    surl,
-  };
-}
+// ═══════════════════════════════════════════════════
+// Third-party API response parsers
+// ═══════════════════════════════════════════════════
 
 function parseApiResponse(apiName: string, data: any, surl: string): { title: string; files: any[]; surl: string } | null {
-  // Ashlynn / darkhacker format: { file_name, download_link, thumb, size, sizebytes }
+  // Format: { file_name, download_link, thumb, size, sizebytes }
   if (data?.file_name && data?.download_link) {
     return {
       title: data.file_name,
@@ -523,11 +764,10 @@ function parseApiResponse(apiName: string, data: any, surl: string): { title: st
     };
   }
 
-  // Ashlynn/darkhacker alternate: { response: [{ resolutions: { ... }, thumbnail, file_name }] }
+  // Format: { response: [{ resolutions: { ... }, thumbnail, file_name }] }
   if (data?.response?.length > 0) {
     const item = data.response[0];
     const resolutions = item.resolutions || {};
-    // Get highest quality download link
     const dlink = resolutions['HD Video'] || resolutions['SD Video'] || resolutions['Fast Download'] || item.link || '';
     
     if (dlink && item.file_name) {
@@ -547,15 +787,16 @@ function parseApiResponse(apiName: string, data: any, surl: string): { title: st
     }
   }
 
-  // tera-core format: { status: 'success', files: [...] }
-  if (data?.status === 'success' && data?.files?.length > 0) {
-    const files = data.files.map((f: any) => ({
-      name: f.filename || f.name || 'Unknown',
-      size: f.size || formatSize(f.size_bytes || 0),
-      sizeBytes: f.size_bytes || 0,
-      thumbnail: f.thumbnails?.original || f.thumbnail || '',
-      isVideo: isVideoFile(f.filename || f.name || ''),
-      dlink: f.download_link || f.dlink || '',
+  // Format: { status: 'success', files: [...] }  OR  { ok: true, data: { files: [...] } }
+  const fileArray = data?.files || data?.data?.files || data?.result?.files;
+  if ((data?.status === 'success' || data?.ok || data?.success) && fileArray?.length > 0) {
+    const files = fileArray.map((f: any) => ({
+      name: f.filename || f.file_name || f.name || 'Unknown',
+      size: f.size || formatSize(f.size_bytes || f.sizebytes || 0),
+      sizeBytes: f.size_bytes || f.sizebytes || 0,
+      thumbnail: f.thumbnails?.original || f.thumbnail || f.thumb || '',
+      isVideo: isVideoFile(f.filename || f.file_name || f.name || ''),
+      dlink: f.download_link || f.dlink || f.url || '',
       fsId: String(f.fs_id || Math.random()),
     }));
 
@@ -567,16 +808,34 @@ function parseApiResponse(apiName: string, data: any, surl: string): { title: st
   }
 
   // Generic: look for download_link / dlink at top level
-  if (data?.download_link || data?.dlink) {
+  if (data?.download_link || data?.dlink || data?.url) {
     return {
-      title: data.filename || data.file_name || data.name || 'TeraBox File',
+      title: data.filename || data.file_name || data.name || data.title || 'TeraBox File',
       files: [{
-        name: data.filename || data.file_name || data.name || 'TeraBox File',
+        name: data.filename || data.file_name || data.name || data.title || 'TeraBox File',
         size: data.size || formatSize(data.size_bytes || data.sizebytes || 0),
         sizeBytes: data.size_bytes || data.sizebytes || 0,
         thumbnail: data.thumbnail || data.thumb || '',
         isVideo: isVideoFile(data.filename || data.file_name || ''),
-        dlink: data.download_link || data.dlink,
+        dlink: data.download_link || data.dlink || data.url,
+        fsId: String(Math.random()),
+      }],
+      surl,
+    };
+  }
+
+  // Nested data object: { data: { download_link, file_name, ... } }
+  if (data?.data?.download_link || data?.data?.dlink) {
+    const d = data.data;
+    return {
+      title: d.filename || d.file_name || d.name || 'TeraBox File',
+      files: [{
+        name: d.filename || d.file_name || d.name || 'TeraBox File',
+        size: d.size || formatSize(d.size_bytes || d.sizebytes || 0),
+        sizeBytes: d.size_bytes || d.sizebytes || 0,
+        thumbnail: d.thumbnail || d.thumb || '',
+        isVideo: isVideoFile(d.filename || d.file_name || ''),
+        dlink: d.download_link || d.dlink,
         fsId: String(Math.random()),
       }],
       surl,
@@ -585,6 +844,10 @@ function parseApiResponse(apiName: string, data: any, surl: string): { title: st
 
   return null;
 }
+
+// ═══════════════════════════════════════════════════
+// Utility functions
+// ═══════════════════════════════════════════════════
 
 function jsonRes(body: any, status = 200) {
   return new Response(JSON.stringify(body), {
