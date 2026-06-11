@@ -7,6 +7,14 @@ const corsHeaders = {
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
+function getTeraBoxCookie(): string {
+  const raw = Deno.env.get('TERABOX_NDUS') || '';
+  let ndus = raw.trim().replace(/^['"]|['"]$/g, '');
+  if (ndus.toLowerCase().startsWith('ndus=')) ndus = ndus.slice(5);
+  ndus = ndus.split(';')[0].trim();
+  return ndus ? `ndus=${ndus}; lang=en;` : 'lang=en;';
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
@@ -26,8 +34,11 @@ Deno.serve(async (req) => {
     // Forward range header for seeking support
     const headers: Record<string, string> = {
       'User-Agent': UA,
-      'Referer': 'https://www.terabox.app/',
+      'Cookie': getTeraBoxCookie(),
+      'Referer': 'https://www.terabox.com/',
+      'Origin': 'https://www.terabox.com',
       'Accept': '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
     };
 
     const rangeHeader = req.headers.get('range');
