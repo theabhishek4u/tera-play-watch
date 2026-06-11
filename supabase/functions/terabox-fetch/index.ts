@@ -291,8 +291,15 @@ async function fetchFromSharePage(rawUrl: string, surl: string, ndus: string): P
   // Extract yunData (TeraBox embeds page state as JS object)
   const yunMatch = html.match(/yunData\s*=\s*(\{[\s\S]*?\});?\s*(?:<\/script>|var\s|window\.)/);
   if (!yunMatch) {
-    console.log('yunData not found in HTML (len=', html.length, ')');
-    throw new Error('yunData not found — link may need login or page changed');
+    console.log('yunData not found in HTML (len=', html.length, '), trying file_list parser');
+    const parsed = parseShareParamsFromHtml(html);
+    if (!parsed) throw new Error('share parameters not found — link may need login or page changed');
+    const files = buildFilesFromList(parsed.fileList, surl, parsed);
+    for (const file of files.filter(f => !f.isDir && !f.dlink)) {
+      await hydrateDlink(file, parsed, cookie, rawUrl, parsed.jsToken || '');
+    }
+    if (!files.some(f => f.dlink)) return null;
+    return { title: files[0]?.name || 'TeraBox File', files, surl };
   }
   let yunData: any;
   try {
@@ -357,11 +364,7 @@ async function fetchFromSharePage(rawUrl: string, surl: string, ndus: string): P
 }
 
 async function _fetchWithCookieImpl(surl: string, ndus: string): Promise<{ title: string; files: any[]; surl: string } | null> {
-  // Sanitize: user may have pasted "ndus=VALUE" or wrapped in quotes
-  let ndusVal = ndus.trim().replace(/^['"]|['"]$/g, '');
-  if (ndusVal.toLowerCase().startsWith('ndus=')) ndusVal = ndusVal.slice(5);
-  ndusVal = ndusVal.split(';')[0].trim();
-  const cookie = `ndus=${ndusVal}; lang=en;`;
+  const cookie = makeTeraCookie(ndus);
   const baseHeaders = {
     'User-Agent': UA,
     'Cookie': cookie,
