@@ -36,7 +36,7 @@ function pickReferer(dlink: string): { referer: string; origin: string } {
   return REFERER_ORIGINS[0];
 }
 
-Deno.serve(async (req) => {
+Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
@@ -141,3 +141,6 @@ Deno.serve(async (req) => {
     });
   }
 });
+
+export {};
+
