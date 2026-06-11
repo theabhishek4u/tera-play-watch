@@ -34,6 +34,15 @@ Deno.serve(async (req) => {
     const ndus = Deno.env.get('TERABOX_NDUS');
     if (ndus) {
       try {
+        const direct = await fetchWithShareList(url.trim(), surl, ndus);
+        if (direct) {
+          console.log(`share-list success! Files: ${direct.files.length}`);
+          return jsonRes({ success: true, data: direct });
+        }
+      } catch (e) {
+        console.log('share-list failed:', e instanceof Error ? e.message : e);
+      }
+      try {
         const direct = await fetchFromSharePage(url.trim(), surl, ndus);
         if (direct) {
           console.log(`share-page success! Files: ${direct.files.length}`);
@@ -87,7 +96,7 @@ Deno.serve(async (req) => {
     return jsonRes({
       success: false,
       fallback: true,
-      error: 'TeraBox could not generate a playable link right now. The saved TeraBox session may be expired, or the share link may need login/access permission.',
+      error: 'TeraBox could not generate a playable link right now. The saved TeraBox login session may be expired, or this share link may be private/deleted/password-protected.',
       code: 'TERABOX_LINK_FETCH_FAILED',
     });
 
@@ -132,11 +141,209 @@ async function fetchWithCookie(surl: string, ndus: string): Promise<{ title: str
   return _fetchWithCookieImpl(surl, ndus);
 }
 
-async function fetchFromSharePage(rawUrl: string, surl: string, ndus: string): Promise<{ title: string; files: any[]; surl: string } | null> {
+async function fetchWithShareList(rawUrl: string, surl: string, ndus: string): Promise<{ title: string; files: any[]; surl: string } | null> {
+  const cookie = makeTeraCookie(ndus);
+  const shorturl = surl.startsWith('1') ? surl.slice(1) : surl;
+  const pageUrl = `https://dm.terabox.app/sharing/link?surl=${encodeURIComponent(surl)}`;
+  const pageRes = await fetch(pageUrl, {
+    headers: {
+      'User-Agent': UA,
+      'Cookie': cookie,
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Referer': 'https://www.terabox.app/',
+    },
+    redirect: 'follow',
+  });
+
+  if (!pageRes.ok) throw new Error(`share landing ${pageRes.status}`);
+  const html = await pageRes.text();
+  const jsToken = extractJsToken(html);
+  console.log('share-list token found:', !!jsToken, 'html len=', html.length);
+
+  const params = new URLSearchParams({
+    app_id: '250528',
+    web: '1',
+    channel: 'share',
+    clienttype: '0',
+    shorturl,
+    root: '1',
+  });
+  if (jsToken) params.set('jsToken', jsToken);
+  params.set('site_referer', 'https://www.terabox.app/');
+
+  const listUrl = `https://dm.terabox.app/share/list?${params.toString()}`;
+  const listRes = await fetch(listUrl, {
+    headers: {
+      'User-Agent': UA,
+      'Cookie': cookie,
+      'Accept': 'application/json, text/plain, */*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'X-Requested-With': 'XMLHttpRequest',
+      'Referer': `${pageUrl}&clearCache=1`,
+      'Origin': 'https://dm.terabox.app',
+    },
+  });
+  if (!listRes.ok) throw new Error(`share/list ${listRes.status}`);
+  const listData = await listRes.json();
+  console.log('share/list errno:', listData?.errno, 'files:', listData?.list?.length || 0, 'errmsg:', listData?.errmsg || '');
+
+  if (listData?.errno !== 0 || !listData?.list?.length) return null;
+  const files = await collectShareFiles(shorturl, listData, cookie, pageUrl, jsToken, listData.list);
+  console.log('share/list flattened files:', files.length, 'videos:', files.filter(f => f.isVideo).length);
+  for (const file of files.filter(f => !f.isDir && !f.dlink)) {
+    await hydrateDlink(file, listData, cookie, rawUrl, jsToken);
+  }
+  if (!files.some(f => f.dlink)) return null;
+
+  return { title: listData.title || files[0]?.name || 'TeraBox File', files, surl: shorturl };
+}
+
+async function collectShareFiles(shorturl: string, source: any, cookie: string, pageUrl: string, jsToken: string, list: any[], depth = 0): Promise<any[]> {
+  const files = buildFilesFromList(list, shorturl, source);
+  const flattened: any[] = [];
+  for (const file of files) {
+    if (file.isDir && file.path && depth < 4) {
+      const params = new URLSearchParams({
+        app_id: '250528',
+        web: '1',
+        channel: 'share',
+        clienttype: '0',
+        shorturl,
+        root: '0',
+        dir: file.path,
+        page: '1',
+        num: '100',
+        order: 'name',
+        desc: '0',
+        site_referer: 'https://www.terabox.app/',
+      });
+      if (jsToken) params.set('jsToken', jsToken);
+      const childRes = await fetch(`https://dm.terabox.app/share/list?${params.toString()}`, {
+        headers: {
+          'User-Agent': UA,
+          'Cookie': cookie,
+          'Accept': 'application/json, text/plain, */*',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'X-Requested-With': 'XMLHttpRequest',
+          'Referer': `${pageUrl}&clearCache=1`,
+          'Origin': 'https://dm.terabox.app',
+        },
+      });
+      if (!childRes.ok) continue;
+      const childData = await childRes.json();
+      console.log('share/list dir:', file.path, 'errno:', childData?.errno, 'files:', childData?.list?.length || 0);
+      if (childData?.errno === 0 && childData?.list?.length) {
+        flattened.push(...await collectShareFiles(shorturl, source, cookie, pageUrl, jsToken, childData.list, depth + 1));
+      }
+    } else {
+      flattened.push(file);
+    }
+  }
+  return flattened;
+}
+
+function makeTeraCookie(ndus: string): string {
   let ndusVal = ndus.trim().replace(/^['"]|['"]$/g, '');
   if (ndusVal.toLowerCase().startsWith('ndus=')) ndusVal = ndusVal.slice(5);
   ndusVal = ndusVal.split(';')[0].trim();
-  const cookie = `ndus=${ndusVal}; lang=en;`;
+  return ndusVal ? `lang=en; ndus=${ndusVal};` : 'lang=en;';
+}
+
+function extractJsToken(html: string): string {
+  const patterns = [
+    /fn%28%22([^%"]+)%22%29/,
+    /fn\("([^"]+)"\)/,
+    /jsToken["']?\s*[:=]\s*["']([^"']+)["']/,
+    /MYJSTOKEN["']?\s*[:=]\s*["']([^"']+)["']/,
+  ];
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match?.[1]) return decodeURIComponent(match[1]);
+  }
+  return '';
+}
+
+function buildFilesFromList(list: any[], surl: string, source: any): any[] {
+  return list.map((item: any) => ({
+    name: item.server_filename || item.filename || item.name || 'Unknown',
+    size: formatSize(Number(item.size) || 0),
+    sizeBytes: Number(item.size) || 0,
+    thumbnail: item.thumbs?.url3 || item.thumbs?.url2 || item.thumbs?.url1 || item.thumb || '',
+    isVideo: isVideoFile(item.server_filename || item.filename || item.name || ''),
+    dlink: item.dlink || '',
+    fsId: String(item.fs_id || item.fsId || Math.random()),
+    path: item.path || '',
+    isDir: String(item.isdir || item.isDir || '0') === '1',
+    shareid: source.shareid || source.share_id || source.shareId,
+    uk: source.uk,
+    sign: source.sign,
+    timestamp: source.timestamp,
+    surl,
+  }));
+}
+
+function parseShareParamsFromHtml(html: string): any | null {
+  const script = html.match(/<script[^>]*>([\s\S]*?file_list[\s\S]*?)<\/script>/)?.[1] || html;
+  const fileListMatch = script.match(/"file_list"\s*:\s*(\[[\s\S]*?\])\s*,\s*"(?:shareid|share_id|uk|sign|timestamp)"/)
+    || script.match(/"file_list"\s*:\s*(\[[\s\S]*?\])/);
+  const shareIdMatch = script.match(/"shareid"\s*:\s*"?([^",}]+)"?/) || script.match(/"share_id"\s*:\s*"?([^",}]+)"?/);
+  const ukMatch = script.match(/"uk"\s*:\s*"?([^",}]+)"?/);
+  const signMatch = script.match(/"sign"\s*:\s*"([^"]+)"/);
+  const timestampMatch = script.match(/"timestamp"\s*:\s*"?([^",}]+)"?/);
+  if (!fileListMatch || !shareIdMatch || !ukMatch || !signMatch || !timestampMatch) return null;
+  try {
+    return {
+      shareid: shareIdMatch[1],
+      uk: ukMatch[1],
+      sign: signMatch[1],
+      timestamp: timestampMatch[1],
+      jsToken: extractJsToken(html),
+      fileList: JSON.parse(fileListMatch[1]),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function hydrateDlink(file: any, source: any, cookie: string, rawUrl: string, jsToken = '') {
+  const shareid = file.shareid || source.shareid || source.share_id || source.shareId;
+  const uk = file.uk || source.uk;
+  const sign = file.sign || source.sign;
+  const timestamp = file.timestamp || source.timestamp;
+  if (!shareid || !uk || !sign || !timestamp || !file.fsId) return;
+
+  const params = new URLSearchParams({
+    app_id: '250528',
+    web: '1',
+    channel: 'share',
+    clienttype: '0',
+    shareid: String(shareid),
+    uk: String(uk),
+    sign: String(sign),
+    timestamp: String(timestamp),
+    fid_list: `[${file.fsId}]`,
+    operation: 'download',
+  });
+  if (jsToken) params.set('jsToken', jsToken);
+
+  const apiRes = await fetch(`https://www.terabox.app/share/list?${params.toString()}`, {
+    headers: {
+      'User-Agent': UA,
+      'Cookie': cookie,
+      'Accept': 'application/json, text/plain, */*',
+      'Referer': rawUrl,
+      'Origin': 'https://www.terabox.app',
+    },
+  });
+  if (!apiRes.ok) return;
+  const apiData = await apiRes.json();
+  file.dlink = apiData?.list?.[0]?.dlink || file.dlink || '';
+  console.log('share/list download errno:', apiData?.errno, 'has dlink:', !!file.dlink);
+}
+
+async function fetchFromSharePage(rawUrl: string, surl: string, ndus: string): Promise<{ title: string; files: any[]; surl: string } | null> {
+  const cookie = makeTeraCookie(ndus);
 
   const headers = {
     'User-Agent': UA,
@@ -152,8 +359,15 @@ async function fetchFromSharePage(rawUrl: string, surl: string, ndus: string): P
   // Extract yunData (TeraBox embeds page state as JS object)
   const yunMatch = html.match(/yunData\s*=\s*(\{[\s\S]*?\});?\s*(?:<\/script>|var\s|window\.)/);
   if (!yunMatch) {
-    console.log('yunData not found in HTML (len=', html.length, ')');
-    throw new Error('yunData not found — link may need login or page changed');
+    console.log('yunData not found in HTML (len=', html.length, '), trying file_list parser');
+    const parsed = parseShareParamsFromHtml(html);
+    if (!parsed) throw new Error('share parameters not found — link may need login or page changed');
+    const files = buildFilesFromList(parsed.fileList, surl, parsed);
+    for (const file of files.filter(f => !f.isDir && !f.dlink)) {
+      await hydrateDlink(file, parsed, cookie, rawUrl, parsed.jsToken || '');
+    }
+    if (!files.some(f => f.dlink)) return null;
+    return { title: files[0]?.name || 'TeraBox File', files, surl };
   }
   let yunData: any;
   try {
@@ -218,11 +432,7 @@ async function fetchFromSharePage(rawUrl: string, surl: string, ndus: string): P
 }
 
 async function _fetchWithCookieImpl(surl: string, ndus: string): Promise<{ title: string; files: any[]; surl: string } | null> {
-  // Sanitize: user may have pasted "ndus=VALUE" or wrapped in quotes
-  let ndusVal = ndus.trim().replace(/^['"]|['"]$/g, '');
-  if (ndusVal.toLowerCase().startsWith('ndus=')) ndusVal = ndusVal.slice(5);
-  ndusVal = ndusVal.split(';')[0].trim();
-  const cookie = `ndus=${ndusVal}; lang=en;`;
+  const cookie = makeTeraCookie(ndus);
   const baseHeaders = {
     'User-Agent': UA,
     'Cookie': cookie,
