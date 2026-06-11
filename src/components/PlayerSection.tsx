@@ -61,7 +61,9 @@ const PlayerSection = () => {
 
       setVideoData(data.data);
       if (data.data.files?.length > 0) {
-        setActiveVideo(data.data.files[0]);
+        const firstPlayableVideo = data.data.files.find((file: TeraBoxFile) => file.isVideo && file.dlink) || data.data.files.find((file: TeraBoxFile) => file.dlink) || data.data.files[0];
+        setActiveVideo(firstPlayableVideo);
+        setPlaying(Boolean(firstPlayableVideo?.dlink));
       }
     } catch (err: any) {
       setError(err.message || "Something went wrong");
@@ -161,7 +163,7 @@ const PlayerSection = () => {
                       className="h-full w-full"
                       controls
                       autoPlay
-                      onError={() => setVideoError("Video playback failed. Try downloading instead.")}
+                      onError={() => setVideoError("Video playback failed because TeraBox rejected the stream. Refresh the backend TeraBox session cookie or try another public video link.")}
                     />
                     {videoError && (
                       <div className="absolute inset-0 flex items-center justify-center bg-black/80">
