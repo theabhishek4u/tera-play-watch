@@ -34,6 +34,15 @@ Deno.serve(async (req) => {
     const ndus = Deno.env.get('TERABOX_NDUS');
     if (ndus) {
       try {
+        const direct = await fetchWithShareList(url.trim(), surl, ndus);
+        if (direct) {
+          console.log(`share-list success! Files: ${direct.files.length}`);
+          return jsonRes({ success: true, data: direct });
+        }
+      } catch (e) {
+        console.log('share-list failed:', e instanceof Error ? e.message : e);
+      }
+      try {
         const direct = await fetchFromSharePage(url.trim(), surl, ndus);
         if (direct) {
           console.log(`share-page success! Files: ${direct.files.length}`);
@@ -87,7 +96,7 @@ Deno.serve(async (req) => {
     return jsonRes({
       success: false,
       fallback: true,
-      error: 'TeraBox could not generate a playable link right now. The saved TeraBox session may be expired, or the share link may need login/access permission.',
+      error: 'TeraBox could not generate a playable link right now. The saved TeraBox login session may be expired, or this share link may be private/deleted/password-protected.',
       code: 'TERABOX_LINK_FETCH_FAILED',
     });
 
