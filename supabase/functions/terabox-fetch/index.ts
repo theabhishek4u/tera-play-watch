@@ -141,11 +141,64 @@ async function fetchWithCookie(surl: string, ndus: string): Promise<{ title: str
   return _fetchWithCookieImpl(surl, ndus);
 }
 
+async function fetchWithShareList(rawUrl: string, surl: string, ndus: string): Promise<{ title: string; files: any[]; surl: string } | null> {
+  const cookie = makeTeraCookie(ndus);
+  const shorturl = surl.startsWith('1') ? surl.slice(1) : surl;
+  const pageUrl = `https://dm.terabox.app/sharing/link?surl=${encodeURIComponent(surl)}`;
+  const pageRes = await fetch(pageUrl, {
+    headers: {
+      'User-Agent': UA,
+      'Cookie': cookie,
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Referer': 'https://www.terabox.app/',
+    },
+    redirect: 'follow',
+  });
+
+  if (!pageRes.ok) throw new Error(`share landing ${pageRes.status}`);
+  const html = await pageRes.text();
+  const jsToken = extractJsToken(html);
+  console.log('share-list token found:', !!jsToken, 'html len=', html.length);
+
+  const params = new URLSearchParams({
+    app_id: '250528',
+    web: '1',
+    channel: 'share',
+    clienttype: '0',
+    shorturl,
+    root: '1',
+  });
+  if (jsToken) params.set('jsToken', jsToken);
+  params.set('site_referer', 'https://www.terabox.app/');
+
+  const listUrl = `https://dm.terabox.app/share/list?${params.toString()}`;
+  const listRes = await fetch(listUrl, {
+    headers: {
+      'User-Agent': UA,
+      'Cookie': cookie,
+      'Accept': 'application/json, text/plain, */*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'X-Requested-With': 'XMLHttpRequest',
+      'Referer': `${pageUrl}&clearCache=1`,
+      'Origin': 'https://dm.terabox.app',
+    },
+  });
+  if (!listRes.ok) throw new Error(`share/list ${listRes.status}`);
+  const listData = await listRes.json();
+  console.log('share/list errno:', listData?.errno, 'files:', listData?.list?.length || 0, 'errmsg:', listData?.errmsg || '');
+
+  if (listData?.errno !== 0 || !listData?.list?.length) return null;
+  const files = buildFilesFromList(listData.list, shorturl, listData);
+  const firstFile = firstLeafFile(files);
+  if (firstFile) await hydrateDlink(firstFile, listData, cookie, rawUrl, jsToken);
+  if (!files.some(f => f.dlink)) return null;
+
+  return { title: listData.title || files[0]?.name || 'TeraBox File', files, surl: shorturl };
+}
+
 async function fetchFromSharePage(rawUrl: string, surl: string, ndus: string): Promise<{ title: string; files: any[]; surl: string } | null> {
-  let ndusVal = ndus.trim().replace(/^['"]|['"]$/g, '');
-  if (ndusVal.toLowerCase().startsWith('ndus=')) ndusVal = ndusVal.slice(5);
-  ndusVal = ndusVal.split(';')[0].trim();
-  const cookie = `ndus=${ndusVal}; lang=en;`;
+  const cookie = makeTeraCookie(ndus);
 
   const headers = {
     'User-Agent': UA,
